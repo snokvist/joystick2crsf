@@ -4,6 +4,9 @@ Joystick2crsf is a small SDL2 utility that maps joystick inputs to Crossfire (CR
 streams them over UDP. It can also publish telemetry as a server-sent events stream and expose RC
 channels through MAVLink when configured.
 
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/162c15f7-df07-4a0d-b02b-1f4b3440a9f9" />
+
+
 ## What is in this repository
 
 - `joystick2crfs.c`: the main application source.
