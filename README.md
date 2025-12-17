@@ -72,3 +72,8 @@ long presses map to `key_short_N`/`key_long_N` (or the `_low` variants for negat
 are trimmed of whitespace before parsing and accept `up`, `down`, `left`, `right`, `enter`/`return`,
 `space`, `a`–`z`, and `0`–`9` (case-insensitive). Ensure the runtime user can open `/dev/uinput`
 which may require root or membership in the `uinput` group.
+
+Channels use CRSF scaling where 1811 is max and 172 is min. High-edge presses arm at 1700 and
+release at 1500, leaving a 200-count hysteresis. Low-edge presses mirror that around the CRSF
+minimum: they trigger at 283 (1811 symmetrical to 1700) and release at 483, keeping the same gap
+to avoid chattering while the stick settles.

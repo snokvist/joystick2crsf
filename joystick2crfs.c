@@ -61,11 +61,18 @@
 #define PROTOCOL_CRSF       0
 #define PROTOCOL_MAVLINK    1
 
-#define KEY_TRIGGER_HIGH    1700
-#define KEY_TRIGGER_LOW     1500
+/*
+ * Keyboard triggers fire on release. A high-edge press starts when a channel reaches
+ * KEY_TRIGGER_HIGH (1700) and releases once it falls to KEY_TRIGGER_LOW (1500). A 200-count
+ * hysteresis prevents repeated toggles while the stick hovers near the threshold. Low-edge
+ * presses mirror those values across the CRSF min/max so a press begins at 283 and releases at
+ * 483, keeping the same hysteresis near CRSF_MIN.
+ */
+#define KEY_TRIGGER_HIGH     1700
+#define KEY_TRIGGER_LOW      1500
 #define KEY_TRIGGER_NEG_HIGH (CRSF_MIN + (CRSF_MAX - KEY_TRIGGER_HIGH))
 #define KEY_TRIGGER_NEG_LOW  (CRSF_MIN + (CRSF_MAX - KEY_TRIGGER_LOW))
-#define KEY_LONG_DEFAULT_MS 700
+#define KEY_LONG_DEFAULT_MS  700
 
 _Static_assert(KEY_TRIGGER_LOW < KEY_TRIGGER_HIGH, "Key trigger low must be below high");
 _Static_assert(KEY_TRIGGER_HIGH <= CRSF_MAX && KEY_TRIGGER_LOW >= CRSF_MIN,
