@@ -1569,9 +1569,10 @@ int main(int argc, char **argv)
                 js_axes = 0;
                 js_hats = 0;
                 js_buttons = 0;
-                restart_requested = 1;
-                restart_sleep = 1;
-                break;
+                next_rescan = now;
+                struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                nanosleep(&delay, NULL);
+                continue;
             }
             if (!gc && js && !SDL_JoystickGetAttached(js)) {
                 fprintf(stderr, "Joystick %d detached\n", cfg.joystick_index);
@@ -1583,9 +1584,10 @@ int main(int argc, char **argv)
                 js_axes = 0;
                 js_hats = 0;
                 js_buttons = 0;
-                restart_requested = 1;
-                restart_sleep = 1;
-                break;
+                next_rescan = now;
+                struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                nanosleep(&delay, NULL);
+                continue;
             }
 
             if (!js && timespec_cmp(&now, &next_rescan) >= 0) {
@@ -1604,9 +1606,10 @@ int main(int argc, char **argv)
                                         cfg.joystick_index);
                                 SDL_GameControllerClose(gc);
                                 gc = NULL;
-                                restart_requested = 1;
-                                restart_sleep = 1;
-                                break;
+                                next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+                                struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                                nanosleep(&delay, NULL);
+                                continue;
                             }
                             js_axes = SDL_JoystickNumAxes(js);
                             js_hats = SDL_JoystickNumHats(js);
@@ -1620,9 +1623,10 @@ int main(int argc, char **argv)
                         } else {
                             fprintf(stderr, "Failed to open game controller %d: %s\n",
                                     cfg.joystick_index, SDL_GetError());
-                            restart_requested = 1;
-                            restart_sleep = 1;
-                            break;
+                            next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+                            struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                            nanosleep(&delay, NULL);
+                            continue;
                         }
                     } else {
                         SDL_Joystick *candidate = SDL_JoystickOpen(cfg.joystick_index);
@@ -1649,27 +1653,30 @@ int main(int argc, char **argv)
                         } else {
                             fprintf(stderr, "Failed to open joystick %d: %s\n",
                                     cfg.joystick_index, SDL_GetError());
-                            restart_requested = 1;
-                            restart_sleep = 1;
-                            break;
+                            next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+                            struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                            nanosleep(&delay, NULL);
+                            continue;
                         }
                     }
                 } else {
                     fprintf(stderr, "Joystick index %d unavailable (only %d detected)\n",
                             cfg.joystick_index, count);
-                    restart_requested = 1;
-                    restart_sleep = 1;
-                    break;
+                    next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+                    struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                    nanosleep(&delay, NULL);
+                    continue;
                 }
                 next_rescan = timespec_add(now, cfg.rescan_interval, 0);
             }
 
             if (!js) {
-                fprintf(stderr, "Joystick %d not available; restarting for rediscovery.\n",
+                fprintf(stderr, "Joystick %d not available; retrying discovery.\n",
                         cfg.joystick_index);
-                restart_requested = 1;
-                restart_sleep = 1;
-                break;
+                next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+                struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                nanosleep(&delay, NULL);
+                continue;
             }
 
             uint16_t ch_source[16];
