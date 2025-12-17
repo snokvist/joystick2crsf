@@ -64,3 +64,11 @@ endef
 
 The resulting root filesystem will include the binary in `/usr/bin`, the configuration under `/etc`,
 and init files in the usual systemd and sysvinit locations.
+
+## Keyboard bindings
+
+Optional keyboard bindings let a channel emit synthetic keypresses through `/dev/uinput`. Short and
+long presses map to `key_short_N`/`key_long_N` (or the `_low` variants for negative edges). Values
+are trimmed of whitespace before parsing and accept `up`, `down`, `left`, `right`, `enter`/`return`,
+`space`, `a`–`z`, and `0`–`9` (case-insensitive). Ensure the runtime user can open `/dev/uinput`
+which may require root or membership in the `uinput` group.

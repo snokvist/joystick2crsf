@@ -864,9 +864,25 @@ static int keycode_from_name(const char *name)
         return -1;
     }
 
-    if (strlen(name) == 1 && isalpha((unsigned char)name[0])) {
-        char lower = (char)tolower((unsigned char)name[0]);
-        return KEY_A + (lower - 'a');
+    if (strlen(name) == 1) {
+        unsigned char ch = (unsigned char)name[0];
+        if (isalpha(ch)) {
+            char lower = (char)tolower(ch);
+            return KEY_A + (lower - 'a');
+        }
+        switch (ch) {
+        case '0': return KEY_0;
+        case '1': return KEY_1;
+        case '2': return KEY_2;
+        case '3': return KEY_3;
+        case '4': return KEY_4;
+        case '5': return KEY_5;
+        case '6': return KEY_6;
+        case '7': return KEY_7;
+        case '8': return KEY_8;
+        case '9': return KEY_9;
+        default: break;
+        }
     }
 
     if (!strcasecmp(name, "up")) {
@@ -884,6 +900,9 @@ static int keycode_from_name(const char *name)
     if (!strcasecmp(name, "enter") || !strcasecmp(name, "return")) {
         return KEY_ENTER;
     }
+    if (!strcasecmp(name, "space") || !strcasecmp(name, "spacebar")) {
+        return KEY_SPACE;
+    }
 
     return -1;
 }
@@ -896,6 +915,7 @@ static const char *keycode_name(int code)
     case KEY_LEFT: return "left";
     case KEY_RIGHT: return "right";
     case KEY_ENTER: return "enter";
+    case KEY_SPACE: return "space";
     default:
         if (code >= KEY_A && code <= KEY_Z) {
             static char buf[2];
@@ -903,19 +923,38 @@ static const char *keycode_name(int code)
             buf[1] = '\0';
             return buf;
         }
+        if (code >= KEY_1 && code <= KEY_9) {
+            static char buf[2];
+            buf[0] = (char)('1' + (code - KEY_1));
+            buf[1] = '\0';
+            return buf;
+        }
+        if (code == KEY_0) {
+            return "0";
+        }
         return "unknown";
     }
 }
 
 static void parse_key_binding(const char *val, int *dst, const char *path, int lineno)
 {
-    int code = keycode_from_name(val);
+    char *copy = strdup(val);
+    if (!copy) {
+        fprintf(stderr, "%s:%d: failed to parse key binding (out of memory)\n", path, lineno);
+        return;
+    }
+
+    trim(copy);
+    int code = keycode_from_name(copy);
     if (code < 0) {
-        fprintf(stderr, "%s:%d: unsupported key '%s' (use up,down,left,right,enter,a-z)\n",
-                path, lineno, val);
+        fprintf(stderr,
+                "%s:%d: unsupported key '%s' (use up,down,left,right,enter,a-z,0-9,space)\n",
+                path, lineno, copy);
+        free(copy);
         return;
     }
     *dst = code;
+    free(copy);
 }
 
 static int rate_supported(int rate)
@@ -1180,7 +1219,8 @@ static void uinput_send_key(int fd, uint16_t code)
 static int uinput_open_keyboard(void)
 {
     static const uint16_t supported_keys[] = {
-        KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER,
+        KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_SPACE,
+        KEY_0, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9,
         KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J,
         KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
         KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
