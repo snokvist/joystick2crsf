@@ -73,6 +73,9 @@ are trimmed of whitespace before parsing and accept `up`, `down`, `left`, `right
 `space`, `a`–`z`, and `0`–`9` (case-insensitive). Ensure the runtime user can open `/dev/uinput`
 which may require root or membership in the `uinput` group.
 
+If gamepad devices appear slowly during boot, set `startup_delay` in the configuration (defaults to
+5 seconds) to defer initial device discovery and initialization.
+
 Channels use CRSF scaling where 1811 is max and 172 is min. High-edge presses arm at 1700 and
 release at 1500, leaving a 200-count hysteresis. Low-edge presses mirror that around the CRSF
 minimum: they trigger at 283 (1811 symmetrical to 1700) and release at 483, keeping the same gap

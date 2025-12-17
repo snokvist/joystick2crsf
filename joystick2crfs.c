@@ -108,6 +108,7 @@ typedef struct {
     int arm_toggle;             /* -1 disables, otherwise channel index */
     int joystick_index;
     int rescan_interval;        /* seconds */
+    int startup_delay;          /* seconds */
     int use_gamecontroller;
     int key_short[16];
     int key_long[16];
@@ -1016,6 +1017,7 @@ static void config_defaults(config_t *cfg)
     cfg->arm_toggle = 4;
     cfg->joystick_index = 0;
     cfg->rescan_interval = 5;
+    cfg->startup_delay = 5;
     cfg->use_gamecontroller = 1;
     cfg->key_long_threshold_ms = KEY_LONG_DEFAULT_MS;
     cfg->key_debug = 0;
@@ -1124,6 +1126,8 @@ static int config_load(config_t *cfg, const char *path)
             cfg->joystick_index = atoi(val);
         } else if (!strcasecmp(key, "rescan_interval")) {
             cfg->rescan_interval = atoi(val);
+        } else if (!strcasecmp(key, "startup_delay")) {
+            cfg->startup_delay = atoi(val);
         } else if (!strcasecmp(key, "use_gamecontroller")) {
             int b;
             if (parse_bool_value(val, &b) == 0) {
@@ -1172,6 +1176,9 @@ static int config_load(config_t *cfg, const char *path)
     fclose(fp);
     if (cfg->rescan_interval <= 0) {
         cfg->rescan_interval = 5;
+    }
+    if (cfg->startup_delay < 0) {
+        cfg->startup_delay = 5;
     }
     if (cfg->joystick_index < 0) {
         cfg->joystick_index = 0;
@@ -1442,6 +1449,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "Config rate must be 25, 50, 125, 250, 333, or 500\n");
             exit_code = 1;
             break;
+        }
+
+        if (cfg.startup_delay > 0) {
+            fprintf(stderr, "Startup delay %d seconds before device discovery...\n",
+                    cfg.startup_delay);
+            struct timespec delay = { .tv_sec = cfg.startup_delay, .tv_nsec = 0 };
+            nanosleep(&delay, NULL);
         }
 
         int key_fd = -1;
