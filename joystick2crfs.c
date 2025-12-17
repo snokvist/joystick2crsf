@@ -61,11 +61,28 @@
 #define PROTOCOL_CRSF       0
 #define PROTOCOL_MAVLINK    1
 
-#define KEY_TRIGGER_HIGH    1700
-#define KEY_TRIGGER_LOW     1500
+/*
+ * Keyboard triggers fire on release. A high-edge press starts when a channel reaches
+ * KEY_TRIGGER_HIGH (1700) and releases once it falls to KEY_TRIGGER_LOW (1500). A 200-count
+ * hysteresis prevents repeated toggles while the stick hovers near the threshold. Low-edge
+ * presses mirror those values across the CRSF min/max so a press begins at 283 and releases at
+ * 483, keeping the same hysteresis near CRSF_MIN.
+ */
+#define KEY_TRIGGER_HIGH     1700
+#define KEY_TRIGGER_LOW      1500
 #define KEY_TRIGGER_NEG_HIGH (CRSF_MIN + (CRSF_MAX - KEY_TRIGGER_HIGH))
 #define KEY_TRIGGER_NEG_LOW  (CRSF_MIN + (CRSF_MAX - KEY_TRIGGER_LOW))
-#define KEY_LONG_DEFAULT_MS 700
+#define KEY_LONG_DEFAULT_MS  700
+
+_Static_assert(KEY_TRIGGER_LOW < KEY_TRIGGER_HIGH, "Key trigger low must be below high");
+_Static_assert(KEY_TRIGGER_HIGH <= CRSF_MAX && KEY_TRIGGER_LOW >= CRSF_MIN,
+               "Key trigger thresholds must be within CRSF range");
+_Static_assert(KEY_TRIGGER_NEG_HIGH >= CRSF_MIN && KEY_TRIGGER_NEG_LOW <= CRSF_MAX,
+               "Negative key trigger thresholds must be within CRSF range");
+_Static_assert(KEY_TRIGGER_NEG_HIGH <= KEY_TRIGGER_NEG_LOW,
+               "Negative key trigger high must be above low");
+_Static_assert((CRSF_MAX - KEY_TRIGGER_HIGH) == (KEY_TRIGGER_NEG_HIGH - CRSF_MIN),
+               "Key trigger thresholds must be symmetric across CRSF min/max");
 
 #define DEFAULT_CONF       "/etc/joystick2crsf.conf"
 #define MAX_LINE_LEN       512
@@ -858,6 +875,28 @@ static void parse_dead_list(const char *str, int out[16])
     free(dup);
 }
 
+static const uint16_t keycode_letters[26] = {
+    KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J,
+    KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
+    KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
+};
+
+typedef struct {
+    const char *name;
+    uint16_t code;
+} key_lookup_t;
+
+static const key_lookup_t keycode_named_keys[] = {
+    {"up", KEY_UP},
+    {"down", KEY_DOWN},
+    {"left", KEY_LEFT},
+    {"right", KEY_RIGHT},
+    {"enter", KEY_ENTER},
+    {"return", KEY_ENTER},
+    {"space", KEY_SPACE},
+    {"spacebar", KEY_SPACE},
+};
+
 static int keycode_from_name(const char *name)
 {
     if (!name || !*name) {
@@ -868,7 +907,7 @@ static int keycode_from_name(const char *name)
         unsigned char ch = (unsigned char)name[0];
         if (isalpha(ch)) {
             char lower = (char)tolower(ch);
-            return KEY_A + (lower - 'a');
+            return keycode_letters[lower - 'a'];
         }
         switch (ch) {
         case '0': return KEY_0;
@@ -885,23 +924,10 @@ static int keycode_from_name(const char *name)
         }
     }
 
-    if (!strcasecmp(name, "up")) {
-        return KEY_UP;
-    }
-    if (!strcasecmp(name, "down")) {
-        return KEY_DOWN;
-    }
-    if (!strcasecmp(name, "left")) {
-        return KEY_LEFT;
-    }
-    if (!strcasecmp(name, "right")) {
-        return KEY_RIGHT;
-    }
-    if (!strcasecmp(name, "enter") || !strcasecmp(name, "return")) {
-        return KEY_ENTER;
-    }
-    if (!strcasecmp(name, "space") || !strcasecmp(name, "spacebar")) {
-        return KEY_SPACE;
+    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
+        if (!strcasecmp(name, keycode_named_keys[i].name)) {
+            return keycode_named_keys[i].code;
+        }
     }
 
     return -1;
@@ -909,31 +935,31 @@ static int keycode_from_name(const char *name)
 
 static const char *keycode_name(int code)
 {
-    switch (code) {
-    case KEY_UP: return "up";
-    case KEY_DOWN: return "down";
-    case KEY_LEFT: return "left";
-    case KEY_RIGHT: return "right";
-    case KEY_ENTER: return "enter";
-    case KEY_SPACE: return "space";
-    default:
-        if (code >= KEY_A && code <= KEY_Z) {
-            static char buf[2];
-            buf[0] = (char)('a' + (code - KEY_A));
-            buf[1] = '\0';
-            return buf;
+    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
+        if (code == (int)keycode_named_keys[i].code) {
+            return keycode_named_keys[i].name;
         }
-        if (code >= KEY_1 && code <= KEY_9) {
-            static char buf[2];
-            buf[0] = (char)('1' + (code - KEY_1));
-            buf[1] = '\0';
-            return buf;
-        }
-        if (code == KEY_0) {
-            return "0";
-        }
-        return "unknown";
     }
+    for (size_t i = 0; i < sizeof(keycode_letters) / sizeof(keycode_letters[0]); i++) {
+        if (code == (int)keycode_letters[i]) {
+            static const char *letters[] = {
+                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+                "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
+                "u", "v", "w", "x", "y", "z"
+            };
+            return letters[i];
+        }
+    }
+    if (code >= KEY_1 && code <= KEY_9) {
+        static char buf[2];
+        buf[0] = (char)('1' + (code - KEY_1));
+        buf[1] = '\0';
+        return buf;
+    }
+    if (code == KEY_0) {
+        return "0";
+    }
+    return "unknown";
 }
 
 static void parse_key_binding(const char *val, int *dst, const char *path, int lineno)
@@ -1225,6 +1251,7 @@ static int uinput_open_keyboard(void)
         KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
         KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
     };
+    const size_t supported_count = sizeof(supported_keys) / sizeof(supported_keys[0]);
 
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
@@ -1237,9 +1264,26 @@ static int uinput_open_keyboard(void)
         close(fd);
         return -1;
     }
-    for (size_t i = 0; i < sizeof(supported_keys) / sizeof(supported_keys[0]); i++) {
+    for (size_t i = 0; i < supported_count; i++) {
         if (ioctl(fd, UI_SET_KEYBIT, supported_keys[i]) < 0) {
             perror("uinput KEYBIT");
+            close(fd);
+            return -1;
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
+        int found = 0;
+        for (size_t j = 0; j < supported_count; j++) {
+            if (keycode_named_keys[i].code == supported_keys[j]) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "uinput: missing support for key '%s' (code %u)\n",
+                    keycode_named_keys[i].name,
+                    (unsigned)keycode_named_keys[i].code);
             close(fd);
             return -1;
         }
