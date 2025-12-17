@@ -1303,6 +1303,16 @@ static int64_t timespec_diff_ns(const struct timespec *start, const struct times
     return sec * NS_PER_SEC + nsec;
 }
 
+static void reset_key_tracking(int key_active[16], int key_low_active[16],
+                               struct timespec key_start[16],
+                               struct timespec key_low_start[16])
+{
+    memset(key_active, 0, sizeof(int) * 16);
+    memset(key_low_active, 0, sizeof(int) * 16);
+    memset(key_start, 0, sizeof(struct timespec) * 16);
+    memset(key_low_start, 0, sizeof(struct timespec) * 16);
+}
+
 /* ------------------------------- Main -------------------------------------- */
 int main(int argc, char **argv)
 {
@@ -1494,8 +1504,8 @@ int main(int argc, char **argv)
         int key_press_low_active[16] = {0};
         struct timespec key_press_start[16];
         struct timespec key_press_low_start[16];
-        memset(key_press_start, 0, sizeof(key_press_start));
-        memset(key_press_low_start, 0, sizeof(key_press_low_start));
+        reset_key_tracking(key_press_active, key_press_low_active,
+                           key_press_start, key_press_low_start);
 
         while (g_run && !restart_requested) {
             struct timespec now;
@@ -1569,6 +1579,10 @@ int main(int argc, char **argv)
                 js_axes = 0;
                 js_hats = 0;
                 js_buttons = 0;
+                arm_press_active = 0;
+                arm_sticky = 0;
+                reset_key_tracking(key_press_active, key_press_low_active,
+                                   key_press_start, key_press_low_start);
                 next_rescan = now;
                 struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
                 nanosleep(&delay, NULL);
@@ -1584,6 +1598,10 @@ int main(int argc, char **argv)
                 js_axes = 0;
                 js_hats = 0;
                 js_buttons = 0;
+                arm_press_active = 0;
+                arm_sticky = 0;
+                reset_key_tracking(key_press_active, key_press_low_active,
+                                   key_press_start, key_press_low_start);
                 next_rescan = now;
                 struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
                 nanosleep(&delay, NULL);
@@ -1606,6 +1624,10 @@ int main(int argc, char **argv)
                                         cfg.joystick_index);
                                 SDL_GameControllerClose(gc);
                                 gc = NULL;
+                                arm_press_active = 0;
+                                arm_sticky = 0;
+                                reset_key_tracking(key_press_active, key_press_low_active,
+                                                   key_press_start, key_press_low_start);
                                 next_rescan = timespec_add(now, cfg.rescan_interval, 0);
                                 struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
                                 nanosleep(&delay, NULL);
@@ -1623,6 +1645,10 @@ int main(int argc, char **argv)
                         } else {
                             fprintf(stderr, "Failed to open game controller %d: %s\n",
                                     cfg.joystick_index, SDL_GetError());
+                            arm_press_active = 0;
+                            arm_sticky = 0;
+                            reset_key_tracking(key_press_active, key_press_low_active,
+                                               key_press_start, key_press_low_start);
                             next_rescan = timespec_add(now, cfg.rescan_interval, 0);
                             struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
                             nanosleep(&delay, NULL);
@@ -1653,26 +1679,38 @@ int main(int argc, char **argv)
                         } else {
                             fprintf(stderr, "Failed to open joystick %d: %s\n",
                                     cfg.joystick_index, SDL_GetError());
+                            arm_press_active = 0;
+                            arm_sticky = 0;
+                            reset_key_tracking(key_press_active, key_press_low_active,
+                                               key_press_start, key_press_low_start);
                             next_rescan = timespec_add(now, cfg.rescan_interval, 0);
                             struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
                             nanosleep(&delay, NULL);
                             continue;
                         }
                     }
-                } else {
-                    fprintf(stderr, "Joystick index %d unavailable (only %d detected)\n",
-                            cfg.joystick_index, count);
-                    next_rescan = timespec_add(now, cfg.rescan_interval, 0);
-                    struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
-                    nanosleep(&delay, NULL);
-                    continue;
-                }
+                  } else {
+                      fprintf(stderr, "Joystick index %d unavailable (only %d detected)\n",
+                              cfg.joystick_index, count);
+                      arm_press_active = 0;
+                      arm_sticky = 0;
+                      reset_key_tracking(key_press_active, key_press_low_active,
+                                         key_press_start, key_press_low_start);
+                      next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+                      struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                      nanosleep(&delay, NULL);
+                      continue;
+                  }
                 next_rescan = timespec_add(now, cfg.rescan_interval, 0);
             }
 
             if (!js) {
                 fprintf(stderr, "Joystick %d not available; retrying discovery.\n",
                         cfg.joystick_index);
+                arm_press_active = 0;
+                arm_sticky = 0;
+                reset_key_tracking(key_press_active, key_press_low_active,
+                                   key_press_start, key_press_low_start);
                 next_rescan = timespec_add(now, cfg.rescan_interval, 0);
                 struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
                 nanosleep(&delay, NULL);
