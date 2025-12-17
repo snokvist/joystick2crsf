@@ -874,6 +874,22 @@ static const uint16_t keycode_letters[26] = {
     KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
 };
 
+typedef struct {
+    const char *name;
+    uint16_t code;
+} key_lookup_t;
+
+static const key_lookup_t keycode_named_keys[] = {
+    {"up", KEY_UP},
+    {"down", KEY_DOWN},
+    {"left", KEY_LEFT},
+    {"right", KEY_RIGHT},
+    {"enter", KEY_ENTER},
+    {"return", KEY_ENTER},
+    {"space", KEY_SPACE},
+    {"spacebar", KEY_SPACE},
+};
+
 static int keycode_from_name(const char *name)
 {
     if (!name || !*name) {
@@ -901,23 +917,10 @@ static int keycode_from_name(const char *name)
         }
     }
 
-    if (!strcasecmp(name, "up")) {
-        return KEY_UP;
-    }
-    if (!strcasecmp(name, "down")) {
-        return KEY_DOWN;
-    }
-    if (!strcasecmp(name, "left")) {
-        return KEY_LEFT;
-    }
-    if (!strcasecmp(name, "right")) {
-        return KEY_RIGHT;
-    }
-    if (!strcasecmp(name, "enter") || !strcasecmp(name, "return")) {
-        return KEY_ENTER;
-    }
-    if (!strcasecmp(name, "space") || !strcasecmp(name, "spacebar")) {
-        return KEY_SPACE;
+    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
+        if (!strcasecmp(name, keycode_named_keys[i].name)) {
+            return keycode_named_keys[i].code;
+        }
     }
 
     return -1;
@@ -925,35 +928,31 @@ static int keycode_from_name(const char *name)
 
 static const char *keycode_name(int code)
 {
-    switch (code) {
-    case KEY_UP: return "up";
-    case KEY_DOWN: return "down";
-    case KEY_LEFT: return "left";
-    case KEY_RIGHT: return "right";
-    case KEY_ENTER: return "enter";
-    case KEY_SPACE: return "space";
-    default:
-        for (size_t i = 0; i < sizeof(keycode_letters) / sizeof(keycode_letters[0]); i++) {
-            if (code == (int)keycode_letters[i]) {
-                static const char *letters[] = {
-                    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
-                    "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
-                    "u", "v", "w", "x", "y", "z"
-                };
-                return letters[i];
-            }
+    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
+        if (code == (int)keycode_named_keys[i].code) {
+            return keycode_named_keys[i].name;
         }
-        if (code >= KEY_1 && code <= KEY_9) {
-            static char buf[2];
-            buf[0] = (char)('1' + (code - KEY_1));
-            buf[1] = '\0';
-            return buf;
-        }
-        if (code == KEY_0) {
-            return "0";
-        }
-        return "unknown";
     }
+    for (size_t i = 0; i < sizeof(keycode_letters) / sizeof(keycode_letters[0]); i++) {
+        if (code == (int)keycode_letters[i]) {
+            static const char *letters[] = {
+                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+                "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
+                "u", "v", "w", "x", "y", "z"
+            };
+            return letters[i];
+        }
+    }
+    if (code >= KEY_1 && code <= KEY_9) {
+        static char buf[2];
+        buf[0] = (char)('1' + (code - KEY_1));
+        buf[1] = '\0';
+        return buf;
+    }
+    if (code == KEY_0) {
+        return "0";
+    }
+    return "unknown";
 }
 
 static void parse_key_binding(const char *val, int *dst, const char *path, int lineno)
@@ -1245,6 +1244,7 @@ static int uinput_open_keyboard(void)
         KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
         KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
     };
+    const size_t supported_count = sizeof(supported_keys) / sizeof(supported_keys[0]);
 
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
@@ -1257,9 +1257,26 @@ static int uinput_open_keyboard(void)
         close(fd);
         return -1;
     }
-    for (size_t i = 0; i < sizeof(supported_keys) / sizeof(supported_keys[0]); i++) {
+    for (size_t i = 0; i < supported_count; i++) {
         if (ioctl(fd, UI_SET_KEYBIT, supported_keys[i]) < 0) {
             perror("uinput KEYBIT");
+            close(fd);
+            return -1;
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
+        int found = 0;
+        for (size_t j = 0; j < supported_count; j++) {
+            if (keycode_named_keys[i].code == supported_keys[j]) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "uinput: missing support for key '%s' (code %u)\n",
+                    keycode_named_keys[i].name,
+                    (unsigned)keycode_named_keys[i].code);
             close(fd);
             return -1;
         }
