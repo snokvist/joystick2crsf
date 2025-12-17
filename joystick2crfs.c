@@ -1435,6 +1435,7 @@ int main(int argc, char **argv)
     }
 
     int exit_code = 0;
+    int startup_delay_applied = 0;
 
     try_rt(10);
 
@@ -1451,11 +1452,12 @@ int main(int argc, char **argv)
             break;
         }
 
-        if (cfg.startup_delay > 0) {
+        if (!startup_delay_applied && cfg.startup_delay > 0) {
             fprintf(stderr, "Startup delay %d seconds before device discovery...\n",
                     cfg.startup_delay);
             struct timespec delay = { .tv_sec = cfg.startup_delay, .tv_nsec = 0 };
             nanosleep(&delay, NULL);
+            startup_delay_applied = 1;
         }
 
         int key_fd = -1;

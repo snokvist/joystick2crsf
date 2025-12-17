@@ -4,7 +4,12 @@ Joystick2crsf is a small SDL2 utility that maps joystick inputs to Crossfire (CR
 streams them over UDP. It can also publish telemetry as a server-sent events stream and expose RC
 channels through MAVLink when configured.
 
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/162c15f7-df07-4a0d-b02b-1f4b3440a9f9" />
+<img
+  width="1920"
+  height="1080"
+  alt="image"
+  src="https://github.com/user-attachments/assets/162c15f7-df07-4a0d-b02b-1f4b3440a9f9"
+/>
 
 
 ## What is in this repository
@@ -73,8 +78,8 @@ are trimmed of whitespace before parsing and accept `up`, `down`, `left`, `right
 `space`, `a`–`z`, and `0`–`9` (case-insensitive). Ensure the runtime user can open `/dev/uinput`
 which may require root or membership in the `uinput` group.
 
-If gamepad devices appear slowly during boot, set `startup_delay` in the configuration (defaults to
-5 seconds) to defer initial device discovery and initialization.
+If gamepad devices appear slowly during boot, set `startup_delay` in the configuration (seconds,
+defaults to 5) to pause before the first device discovery; set to `0` to disable the delay.
 
 Channels use CRSF scaling where 1811 is max and 172 is min. High-edge presses arm at 1700 and
 release at 1500, leaving a 200-count hysteresis. Low-edge presses mirror that around the CRSF
