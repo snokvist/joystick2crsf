@@ -1606,9 +1606,10 @@ int main(int argc, char **argv)
                                         cfg.joystick_index);
                                 SDL_GameControllerClose(gc);
                                 gc = NULL;
-                                restart_requested = 1;
-                                restart_sleep = 1;
-                                break;
+                                next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+                                struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                                nanosleep(&delay, NULL);
+                                continue;
                             }
                             js_axes = SDL_JoystickNumAxes(js);
                             js_hats = SDL_JoystickNumHats(js);
@@ -1670,7 +1671,7 @@ int main(int argc, char **argv)
             }
 
             if (!js) {
-                fprintf(stderr, "Joystick %d not available; restarting for rediscovery.\n",
+                fprintf(stderr, "Joystick %d not available; retrying discovery.\n",
                         cfg.joystick_index);
                 next_rescan = timespec_add(now, cfg.rescan_interval, 0);
                 struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
