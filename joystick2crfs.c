@@ -153,7 +153,9 @@ typedef struct {
 static volatile int g_run = 1;
 static volatile sig_atomic_t g_reload = 0;
 static void on_sigint(int sig){ (void)sig; g_run = 0; }
+#ifndef _WIN32
 static void on_sighup(int sig){ (void)sig; g_reload = 1; }
+#endif
 
 #ifdef _WIN32
 static LARGE_INTEGER perf_freq;
@@ -479,7 +481,7 @@ static int open_sse_listener(const char *bind_spec)
             continue;
         }
         int one = 1;
-        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
         if (bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
             if (listen(fd, 4) == 0) {
                 set_nonblock(fd);
@@ -504,7 +506,7 @@ static int open_sse_listener(const char *bind_spec)
 static int sse_handshake(int fd, const char *path)
 {
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
 
     char req[1024];
     size_t used = 0;
@@ -956,6 +958,7 @@ static void parse_dead_list(const char *str, int out[16])
     free(dup);
 }
 
+#ifndef _WIN32
 static const uint16_t keycode_letters[26] = {
     KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J,
     KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
@@ -1042,6 +1045,19 @@ static const char *keycode_name(int code)
     }
     return "unknown";
 }
+#else
+static int keycode_from_name(const char *name)
+{
+    (void)name;
+    return -1;
+}
+
+static const char *keycode_name(int code)
+{
+    (void)code;
+    return "unknown";
+}
+#endif
 
 static void parse_key_binding(const char *val, int *dst, const char *path, int lineno)
 {
@@ -1660,7 +1676,9 @@ int main(int argc, char **argv)
                 socket_close(sse_fd);
             }
             if (key_fd >= 0) {
+#ifndef _WIN32
                 ioctl(key_fd, UI_DEV_DESTROY);
+#endif
                 close(key_fd);
             }
             break;
@@ -2096,8 +2114,8 @@ int main(int argc, char **argv)
                 }
 
                 if (frame_len > 0 && udp_fd >= 0) {
-                    ssize_t sent = sendto(udp_fd, frame, frame_len, 0,
-                                           (struct sockaddr *)&udp_addr, udp_addrlen);
+                    ssize_t sent = sendto(udp_fd, (const char *)frame, frame_len, 0,
+                                          (struct sockaddr *)&udp_addr, udp_addrlen);
                     if (sent < 0) {
                         if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
                             perror("udp send");
