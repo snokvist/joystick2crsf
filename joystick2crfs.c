@@ -294,6 +294,18 @@ static int parse_host_port(const char *spec, char **host_out, char **port_out)
     return 0;
 }
 
+static int set_nonblock(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int open_udp_target(const char *target, struct sockaddr_storage *addr, socklen_t *addrlen)
 {
     char *host = NULL;
@@ -335,19 +347,10 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
         perror("udp socket");
         return -1;
     }
+    if (set_nonblock(fd) < 0) {
+        perror("udp nonblock");
+    }
     return fd;
-}
-
-static int set_nonblock(int fd)
-{
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
-        return -1;
-    }
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        return -1;
-    }
-    return 0;
 }
 
 static int sse_send_all(int fd, const char *buf, size_t len)
@@ -1630,7 +1633,7 @@ int main(int argc, char **argv)
             if (timespec_cmp(&now, &deadline) < 0) {
                 int64_t wait_ns = timespec_diff_ns(&now, &deadline);
                 if (wait_ns > 0) {
-                    wait_ms = (int)((wait_ns + 999999L) / 1000000L);
+                    wait_ms = (int)(wait_ns / 1000000L);
                 }
             }
 
@@ -1648,6 +1651,12 @@ int main(int argc, char **argv)
 
             clock_gettime(CLOCK_MONOTONIC, &now);
 
+            if (!have_event && timespec_cmp(&now, &deadline) < 0) {
+                if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL) == 0) {
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                }
+            }
+
             double waited_s = (double)timespec_diff_ns(&wait_start, &now) / 1e9;
             if (waited_s < wait_min) {
                 wait_min = waited_s;
@@ -1661,10 +1670,6 @@ int main(int argc, char **argv)
                 wake_events++;
             } else {
                 wake_timeouts++;
-            }
-
-            if (!have_event && timespec_cmp(&now, &deadline) < 0) {
-                continue;
             }
 
             if (g_reload) {
