@@ -21,7 +21,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netdb.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -31,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 #ifndef _WIN32
+#include <netdb.h>
 #include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
