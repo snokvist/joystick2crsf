@@ -16,10 +16,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: windows-x86_64
-            runs_on: windows-latest
-            kind: windows
-
           - name: linux-x86_64
             runs_on: ubuntu-latest
             kind: linux
@@ -31,47 +27,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      # --------------------
-      # Windows build (MSYS2)
-      # --------------------
-      - name: Set up MSYS2
-        if: matrix.kind == 'windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-pkg-config
-            mingw-w64-x86_64-SDL2
-            zip
-            make
-
-
-      - name: Build (Windows)
-        if: matrix.kind == 'windows'
-        shell: msys2 {0}
-        run: |
-          set -euxo pipefail
-          make clean || true
-          make
-          ls -la
-
-          # Package exe + SDL2.dll so it runs on a clean Windows machine
-          mkdir -p dist
-          cp -v joystick2crsf.exe dist/
-          cp -v /mingw64/bin/SDL2.dll dist/ || true
-
-          cd dist
-          zip -9r "../joystick2crsf-${{ matrix.name }}.zip" .
-
-      - name: Upload artifact (Windows)
-        if: matrix.kind == 'windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: joystick2crsf-${{ matrix.name }}
-          path: joystick2crsf-${{ matrix.name }}.zip
 
       # --------------------
       # Linux build (x86_64 + arm64)
