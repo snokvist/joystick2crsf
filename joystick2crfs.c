@@ -294,6 +294,18 @@ static int parse_host_port(const char *spec, char **host_out, char **port_out)
     return 0;
 }
 
+static int set_nonblock(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int open_udp_target(const char *target, struct sockaddr_storage *addr, socklen_t *addrlen)
 {
     char *host = NULL;
@@ -339,18 +351,6 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
         perror("udp nonblock");
     }
     return fd;
-}
-
-static int set_nonblock(int fd)
-{
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
-        return -1;
-    }
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        return -1;
-    }
-    return 0;
 }
 
 static int sse_send_all(int fd, const char *buf, size_t len)
