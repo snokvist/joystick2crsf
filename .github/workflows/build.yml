@@ -1,0 +1,106 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            runs_on: windows-latest
+            kind: windows
+
+          - name: linux-x86_64
+            runs_on: ubuntu-latest
+            kind: linux
+
+          # Native ARM64 runner (best for RK3566/Radxa Zero 3 aarch64 binaries)
+          - name: linux-arm64
+            runs_on: ubuntu-24.04-arm
+            kind: linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --------------------
+      # Windows build (MSYS2)
+      # --------------------
+      - name: Set up MSYS2
+        if: matrix.kind == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-make
+            zip
+
+      - name: Build (Windows)
+        if: matrix.kind == 'windows'
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          make clean || true
+          make
+          ls -la
+
+          # Package exe + SDL2.dll so it runs on a clean Windows machine
+          mkdir -p dist
+          cp -v joystick2crsf.exe dist/
+          cp -v /mingw64/bin/SDL2.dll dist/ || true
+
+          cd dist
+          zip -9r "../joystick2crsf-${{ matrix.name }}.zip" .
+
+      - name: Upload artifact (Windows)
+        if: matrix.kind == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: joystick2crsf-${{ matrix.name }}
+          path: joystick2crsf-${{ matrix.name }}.zip
+
+      # --------------------
+      # Linux build (x86_64 + arm64)
+      # --------------------
+      - name: Install deps (Linux)
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libsdl2-dev
+
+      - name: Build + stage install (Linux)
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make clean || true
+          make
+
+          # Create a relocatable install tree for the artifact
+          rm -rf staging
+          make DESTDIR="$PWD/staging" install
+
+          tar -C staging -czf "joystick2crsf-${{ matrix.name }}.tar.gz" .
+
+      - name: Upload artifact (Linux)
+        if: matrix.kind == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: joystick2crsf-${{ matrix.name }}
+          path: joystick2crsf-${{ matrix.name }}.tar.gz
