@@ -21,23 +21,48 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/uinput.h>
 #include <netdb.h>
-#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+#ifndef _WIN32
+#include <sched.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#endif
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#else
+#include <linux/uinput.h>
+#endif
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
+#endif
+
+#ifdef _WIN32
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+#ifndef _TIMESPEC_DEFINED
+#define _TIMESPEC_DEFINED
+struct timespec {
+    time_t tv_sec;
+    long tv_nsec;
+};
+#endif
+static int clock_gettime_win32(struct timespec *ts);
+static int nanosleep_win32(const struct timespec *req);
+#define clock_gettime(clock_id, ts) clock_gettime_win32(ts)
+#define nanosleep(req, rem) nanosleep_win32(req)
 #endif
 
 /* ------------------------------------------------------------------------- */
@@ -129,6 +154,43 @@ static volatile int g_run = 1;
 static volatile sig_atomic_t g_reload = 0;
 static void on_sigint(int sig){ (void)sig; g_run = 0; }
 static void on_sighup(int sig){ (void)sig; g_reload = 1; }
+
+#ifdef _WIN32
+static LARGE_INTEGER perf_freq;
+#endif
+
+static int socket_close(int fd)
+{
+#ifdef _WIN32
+    return closesocket((SOCKET)fd);
+#else
+    return close(fd);
+#endif
+}
+
+#ifdef _WIN32
+static void win32_time_init(void)
+{
+    QueryPerformanceFrequency(&perf_freq);
+}
+
+static int clock_gettime_win32(struct timespec *ts)
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double seconds = (double)now.QuadPart / (double)perf_freq.QuadPart;
+    ts->tv_sec = (time_t)seconds;
+    ts->tv_nsec = (long)((seconds - (double)ts->tv_sec) * 1000000000.0);
+    return 0;
+}
+
+static int nanosleep_win32(const struct timespec *req)
+{
+    DWORD millis = (DWORD)(req->tv_sec * 1000 + req->tv_nsec / 1000000);
+    Sleep(millis);
+    return 0;
+}
+#endif
 
 /* ------------------------------------------------------------------------- */
 static uint8_t crc8(const uint8_t *d, size_t n)
@@ -340,6 +402,13 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
 
 static int set_nonblock(int fd)
 {
+#ifdef _WIN32
+    u_long mode = 1;
+    if (ioctlsocket((SOCKET)fd, FIONBIO, &mode) != 0) {
+        return -1;
+    }
+    return 0;
+#else
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
         return -1;
@@ -348,6 +417,7 @@ static int set_nonblock(int fd)
         return -1;
     }
     return 0;
+#endif
 }
 
 static int sse_send_all(int fd, const char *buf, size_t len)
@@ -416,7 +486,7 @@ static int open_sse_listener(const char *bind_spec)
                 break;
             }
         }
-        close(fd);
+        socket_close(fd);
         fd = -1;
     }
 
@@ -530,12 +600,12 @@ static int sse_accept_pending(int listen_fd, int *client_fd, const char *path)
             "Content-Length: 0\r\n"
             "Connection: close\r\n\r\n";
         (void)sse_send_all(cfd, reject, strlen(reject));
-        close(cfd);
+        socket_close(cfd);
         return 0;
     }
 
     if (prev_fd >= 0) {
-        close(prev_fd);
+        socket_close(prev_fd);
     }
 
     *client_fd = cfd;
@@ -589,10 +659,14 @@ static int sse_send_frame(int fd, const uint16_t ch[16], const int32_t raw[16])
 
 static void try_rt(int prio)
 {
+#ifdef _WIN32
+    (void)prio;
+#else
     struct sched_param sp = { .sched_priority = prio };
     if (!sched_setscheduler(0, SCHED_FIFO, &sp)) {
         fprintf(stderr, "◎ SCHED_FIFO %d\n", prio);
     }
+#endif
 }
 
 static inline uint16_t scale_axis(int32_t v)
@@ -1233,6 +1307,27 @@ static int config_load(config_t *cfg, const char *path)
 }
 
 /* --------------------------- Uinput helpers -------------------------------- */
+#ifdef _WIN32
+static int uinput_emit_event(int fd, uint16_t type, uint16_t code, int32_t value)
+{
+    (void)fd;
+    (void)type;
+    (void)code;
+    (void)value;
+    return -1;
+}
+
+static void uinput_send_key(int fd, uint16_t code)
+{
+    (void)fd;
+    (void)code;
+}
+
+static int uinput_open_keyboard(void)
+{
+    return -1;
+}
+#else
 static int uinput_emit_event(int fd, uint16_t type, uint16_t code, int32_t value)
 {
     struct input_event ev;
@@ -1350,6 +1445,7 @@ static int uinput_open_keyboard(void)
 
     return fd;
 }
+#endif
 
 /* --------------------------- Time helpers ---------------------------------- */
 static int timespec_cmp(const struct timespec *a, const struct timespec *b)
@@ -1423,7 +1519,9 @@ int main(int argc, char **argv)
     }
 
     signal(SIGINT, on_sigint);
+#ifndef _WIN32
     signal(SIGHUP, on_sighup);
+#endif
 
     config_t cfg;
     config_defaults(&cfg);
@@ -1435,8 +1533,20 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#ifdef _WIN32
+    win32_time_init();
+    WSADATA wsa_data;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        fprintf(stderr, "WSAStartup failed\n");
+        return 1;
+    }
+#endif
+
     if (SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) < 0) {
         fprintf(stderr, "SDL: %s\n", SDL_GetError());
+#ifdef _WIN32
+        WSACleanup();
+#endif
         return 1;
     }
 
@@ -1478,7 +1588,11 @@ int main(int argc, char **argv)
         if (key_enabled) {
             key_fd = uinput_open_keyboard();
             if (key_fd < 0) {
+#ifdef _WIN32
+                fprintf(stderr, "Keyboard bindings requested but uinput is unavailable; disabling.\n");
+#else
                 fprintf(stderr, "Keyboard bindings requested but /dev/uinput is unavailable; disabling.\n");
+#endif
                 key_enabled = 0;
             }
         }
@@ -1537,13 +1651,13 @@ int main(int argc, char **argv)
             js = NULL;
             js_owned = 0;
             if (udp_fd >= 0) {
-                close(udp_fd);
+                socket_close(udp_fd);
             }
             if (sse_client_fd >= 0) {
-                close(sse_client_fd);
+                socket_close(sse_client_fd);
             }
             if (sse_fd >= 0) {
-                close(sse_fd);
+                socket_close(sse_fd);
             }
             if (key_fd >= 0) {
                 ioctl(key_fd, UI_DEV_DESTROY);
@@ -1951,7 +2065,7 @@ int main(int argc, char **argv)
                 if (sse_client_fd >= 0 && timespec_cmp(&now, &next_sse_emit) >= 0) {
                     if (sse_send_frame(sse_client_fd, ch_out, raw_out) < 0) {
                         fprintf(stderr, "SSE client disconnected\n");
-                        close(sse_client_fd);
+                        socket_close(sse_client_fd);
                         sse_client_fd = -1;
                     } else {
                         next_sse_emit = timespec_add(now, 0, SSE_INTERVAL_NS);
@@ -2065,19 +2179,21 @@ int main(int argc, char **argv)
             js_owned = 0;
         }
         if (udp_fd >= 0) {
-            close(udp_fd);
+            socket_close(udp_fd);
             udp_fd = -1;
         }
         if (sse_client_fd >= 0) {
-            close(sse_client_fd);
+            socket_close(sse_client_fd);
             sse_client_fd = -1;
         }
         if (sse_fd >= 0) {
-            close(sse_fd);
+            socket_close(sse_fd);
             sse_fd = -1;
         }
         if (key_fd >= 0) {
+#ifndef _WIN32
             ioctl(key_fd, UI_DEV_DESTROY);
+#endif
             close(key_fd);
             key_fd = -1;
         }
@@ -2096,5 +2212,8 @@ int main(int argc, char **argv)
     }
 
     SDL_Quit();
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return exit_code;
 }
