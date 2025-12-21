@@ -6,6 +6,12 @@
  * UDP peer. Runtime
  * behaviour is configured exclusively via a config
  * file (default: /etc/joystick2crsf.conf).
+
+ * autod – Autod Personal Use License
+ * Copyright (c) 2025 Joakim Snökvist
+ * Licensed for personal, non-commercial use only.
+ * Redistribution or commercial use requires prior written approval from Joakim Snökvist.
+ * See LICENSE.md for full terms.
  */
 
 #define _POSIX_C_SOURCE 200809L
