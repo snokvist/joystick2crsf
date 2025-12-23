@@ -14,8 +14,8 @@ channels through MAVLink when configured.
 
 ## What is in this repository
 
-- `joystick2crfs.c`: the main application source.
-- `joystick2crfs.conf`: default configuration file read by the binary.
+- `joystick2crsf.c`: the main application source.
+- `joystick2crsf.conf`: default configuration file read by the binary.
 - `S96joystick2crsf`: a simple init script for sysvinit-based systems.
 - `joystick2crsf.service`: a systemd unit with placeholder paths.
 - `Makefile`: a Buildroot-friendly build script that builds and installs the binary and helpers.
