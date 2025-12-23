@@ -1,5 +1,5 @@
 TARGET ?= joystick2crsf
-SRCS := joystick2crfs.c
+SRCS := joystick2crsf.c
 OBJS := $(SRCS:.c=.o)
 
 PREFIX ?= /usr
@@ -32,7 +32,7 @@ $(TARGET): $(OBJS)
 
 install: $(TARGET)
 	$(INSTALL) -D -m 0755 $(TARGET) $(DESTDIR)$(JOYSTICK2CRSF_BIN)
-	$(INSTALL) -D -m 0644 joystick2crfs.conf \
+	$(INSTALL) -D -m 0644 joystick2crsf.conf \
 		$(DESTDIR)$(JOYSTICK2CRSF_CONF)
 	$(INSTALL) -D -m 0755 S96joystick2crsf \
 		$(DESTDIR)$(INITDDIR)/S96joystick2crsf
