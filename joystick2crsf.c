@@ -1044,7 +1044,9 @@ static int config_load(config_t *cfg, const char *path)
                         "actions instead.\n");
                 warned_key_bindings = 1;
             }
-        } else if (!strncasecmp(key, "action_", 7)) {
+        } else if (!strcasecmp(key, "verbose") ||
+                   !strcasecmp(key, "http_timeout_ms") ||
+                   !strncasecmp(key, "action_", 7)) {
             /* Action bindings are parsed separately; ignore here to avoid warnings. */
         } else {
             fprintf(stderr, "%s:%d: unknown key '%s'\n", path, lineno, key);
