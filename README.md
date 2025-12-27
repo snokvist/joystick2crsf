@@ -22,7 +22,16 @@ channels through MAVLink when configured.
 
 ## Building
 
-The project depends on SDL2 headers and `pkg-config`. To build on a development machine:
+The project depends on SDL2 headers, libcurl (for `action_keys`), and `pkg-config`. To build on a
+development machine:
+
+```sh
+set -euxo pipefail
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  build-essential pkg-config libsdl2-dev libcurl4-openssl-dev
+make
+```
 
 ```sh
 make
@@ -92,7 +101,8 @@ to avoid chattering while the stick settles.
 configured separately from `joystick2crsf` and ignores joystick state. Key features:
 
 - Bind actions to stdin characters (`key=...`); feed it with real keyboard input or any process that
-  injects keypresses (including the main joystick2crsf uinput events).
+  injects keypresses (including the main joystick2crsf uinput events). Special names `up`, `down`,
+  `left`, `right`, `enter`/`return`, and `space`/`spacebar` are also supported.
 - Transports: `udp` (send payload verbatim) or `http` (`GET`/`POST` with optional headers).
 - Config fields: `destination`/`url`, `body`, `header`, and `timeout_ms`.
 
