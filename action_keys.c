@@ -745,24 +745,44 @@ static int map_evdev_key(int code, action_keycode_t *out_code, char *out_char)
     case KEY_ENTER:
     case KEY_KPENTER: *out_code = ACTION_KEY_ENTER; return 0;
     case KEY_SPACE: *out_code = ACTION_KEY_SPACE; return 0;
-    default: break;
+    case KEY_1: *out_code = ACTION_KEY_CHAR; *out_char = '1'; return 0;
+    case KEY_2: *out_code = ACTION_KEY_CHAR; *out_char = '2'; return 0;
+    case KEY_3: *out_code = ACTION_KEY_CHAR; *out_char = '3'; return 0;
+    case KEY_4: *out_code = ACTION_KEY_CHAR; *out_char = '4'; return 0;
+    case KEY_5: *out_code = ACTION_KEY_CHAR; *out_char = '5'; return 0;
+    case KEY_6: *out_code = ACTION_KEY_CHAR; *out_char = '6'; return 0;
+    case KEY_7: *out_code = ACTION_KEY_CHAR; *out_char = '7'; return 0;
+    case KEY_8: *out_code = ACTION_KEY_CHAR; *out_char = '8'; return 0;
+    case KEY_9: *out_code = ACTION_KEY_CHAR; *out_char = '9'; return 0;
+    case KEY_0: *out_code = ACTION_KEY_CHAR; *out_char = '0'; return 0;
+    case KEY_A: *out_code = ACTION_KEY_CHAR; *out_char = 'a'; return 0;
+    case KEY_B: *out_code = ACTION_KEY_CHAR; *out_char = 'b'; return 0;
+    case KEY_C: *out_code = ACTION_KEY_CHAR; *out_char = 'c'; return 0;
+    case KEY_D: *out_code = ACTION_KEY_CHAR; *out_char = 'd'; return 0;
+    case KEY_E: *out_code = ACTION_KEY_CHAR; *out_char = 'e'; return 0;
+    case KEY_F: *out_code = ACTION_KEY_CHAR; *out_char = 'f'; return 0;
+    case KEY_G: *out_code = ACTION_KEY_CHAR; *out_char = 'g'; return 0;
+    case KEY_H: *out_code = ACTION_KEY_CHAR; *out_char = 'h'; return 0;
+    case KEY_I: *out_code = ACTION_KEY_CHAR; *out_char = 'i'; return 0;
+    case KEY_J: *out_code = ACTION_KEY_CHAR; *out_char = 'j'; return 0;
+    case KEY_K: *out_code = ACTION_KEY_CHAR; *out_char = 'k'; return 0;
+    case KEY_L: *out_code = ACTION_KEY_CHAR; *out_char = 'l'; return 0;
+    case KEY_M: *out_code = ACTION_KEY_CHAR; *out_char = 'm'; return 0;
+    case KEY_N: *out_code = ACTION_KEY_CHAR; *out_char = 'n'; return 0;
+    case KEY_O: *out_code = ACTION_KEY_CHAR; *out_char = 'o'; return 0;
+    case KEY_P: *out_code = ACTION_KEY_CHAR; *out_char = 'p'; return 0;
+    case KEY_Q: *out_code = ACTION_KEY_CHAR; *out_char = 'q'; return 0;
+    case KEY_R: *out_code = ACTION_KEY_CHAR; *out_char = 'r'; return 0;
+    case KEY_S: *out_code = ACTION_KEY_CHAR; *out_char = 's'; return 0;
+    case KEY_T: *out_code = ACTION_KEY_CHAR; *out_char = 't'; return 0;
+    case KEY_U: *out_code = ACTION_KEY_CHAR; *out_char = 'u'; return 0;
+    case KEY_V: *out_code = ACTION_KEY_CHAR; *out_char = 'v'; return 0;
+    case KEY_W: *out_code = ACTION_KEY_CHAR; *out_char = 'w'; return 0;
+    case KEY_X: *out_code = ACTION_KEY_CHAR; *out_char = 'x'; return 0;
+    case KEY_Y: *out_code = ACTION_KEY_CHAR; *out_char = 'y'; return 0;
+    case KEY_Z: *out_code = ACTION_KEY_CHAR; *out_char = 'z'; return 0;
+    default: return -1;
     }
-    if (code >= KEY_A && code <= KEY_Z) {
-        *out_code = ACTION_KEY_CHAR;
-        *out_char = (char)('a' + (code - KEY_A));
-        return 0;
-    }
-    if (code >= KEY_1 && code <= KEY_9) {
-        *out_code = ACTION_KEY_CHAR;
-        *out_char = (char)('1' + (code - KEY_1));
-        return 0;
-    }
-    if (code == KEY_0) {
-        *out_code = ACTION_KEY_CHAR;
-        *out_char = '0';
-        return 0;
-    }
-    return -1;
 }
 
 int main(int argc, char **argv)
