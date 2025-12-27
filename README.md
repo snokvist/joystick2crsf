@@ -22,9 +22,14 @@ channels through MAVLink when configured.
 
 ## Building
 
-The project depends on SDL2 headers and `pkg-config`. To build on a development machine:
+The project depends on SDL2 headers, libcurl (for `action_keys`), and `pkg-config`. To build on a
+development machine:
 
 ```sh
+set -euxo pipefail
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  build-essential pkg-config libsdl2-dev libcurl4-openssl-dev
 make
 ```
 
@@ -85,3 +90,24 @@ Channels use CRSF scaling where 1811 is max and 172 is min. High-edge presses ar
 release at 1500, leaving a 200-count hysteresis. Low-edge presses mirror that around the CRSF
 minimum: they trigger at 283 (1811 symmetrical to 1700) and release at 483, keeping the same gap
 to avoid chattering while the stick settles.
+
+## action_keys helper
+
+`action_keys` is a small helper binary that fires UDP or HTTP actions when keys are pressed. It is
+configured separately from `joystick2crsf` and ignores joystick state. Key features:
+
+- Bind actions to stdin characters (`key=...`); feed it with real keyboard input or any process that
+  injects keypresses (including the main joystick2crsf uinput events). Special names `up`, `down`,
+  `left`, `right`, `enter`/`return`, and `space`/`spacebar` are also supported.
+- Transports: `udp` (send payload verbatim) or `http` (`GET`/`POST` with optional headers).
+- Config fields: `destination`/`url`, `body`, `header`, and `timeout_ms`.
+
+Example config (`/etc/action_keys.conf`):
+
+```
+action_1=key=a,transport=udp,url=udp://10.0.0.2:9000,body={"ping":1}
+action_2=key=b,transport=http,url=http://10.0.0.2/api,method=POST,body={"cmd":"start"}
+```
+
+Run `action_keys /path/to/config` and press the configured keys to dispatch actions; use `Ctrl+C`
+to exit.
