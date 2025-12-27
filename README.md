@@ -92,6 +92,7 @@ logic.
 Key features:
 
 - Bind actions to channels with `channel`, `edge=high|low`, and `press=short|long|any`.
+- Tune action logging with `verbose=0|1` and HTTP timeouts with `http_timeout_ms` (ms).
 - Transports: `udp` (send payload verbatim) or `http` (`GET`/`POST` with optional headers).
 - Config fields: `destination`/`url`, `body`, `header`, and `timeout_ms`.
 
