@@ -75,21 +75,12 @@ endef
 The resulting root filesystem will include the binary in `/usr/bin`, the configuration under `/etc`,
 and init files in the usual systemd and sysvinit locations.
 
-## Keyboard bindings
-
-Optional keyboard bindings let a channel emit synthetic keypresses through `/dev/uinput`. Short and
-long presses map to `key_short_N`/`key_long_N` (or the `_low` variants for negative edges). Values
-are trimmed of whitespace before parsing and accept `up`, `down`, `left`, `right`, `enter`/`return`,
-`space`, `a`–`z`, and `0`–`9` (case-insensitive). Ensure the runtime user can open `/dev/uinput`
-which may require root or membership in the `uinput` group.
-
 If gamepad devices appear slowly during boot, set `startup_delay` in the configuration (seconds,
-defaults to 5) to pause before the first device discovery; set to `0` to disable the delay.
-
-Channels use CRSF scaling where 1811 is max and 172 is min. High-edge presses arm at 1700 and
-release at 1500, leaving a 200-count hysteresis. Low-edge presses mirror that around the CRSF
-minimum: they trigger at 283 (1811 symmetrical to 1700) and release at 483, keeping the same gap
-to avoid chattering while the stick settles.
+defaults to 5) to pause before the first device discovery; set to `0` to disable the delay. Channels
+use CRSF scaling where 1811 is max and 172 is min. High-edge presses arm at 1700 and release at
+1500, leaving a 200-count hysteresis. Low-edge presses mirror that around the CRSF minimum: they
+trigger at 283 (1811 symmetrical to 1700) and release at 483, keeping the same gap to avoid
+chattering while the stick settles.
 
 ## Action keys configuration
 
@@ -110,5 +101,4 @@ action_1=channel=5,edge=high,press=short,transport=udp,url=udp://10.0.0.2:9000,b
 action_2=channel=6,edge=low,press=long,transport=http,url=http://10.0.0.2/api,method=POST,body={"cmd":"start"}
 ```
 
-The dispatch runs even when `/dev/uinput` is unavailable, so remove or rename the config file if you
-want to disable the action hooks.
+Remove or rename the config file if you want to disable the action hooks.

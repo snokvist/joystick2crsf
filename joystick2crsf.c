@@ -33,7 +33,6 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1341,10 +1340,6 @@ int main(int argc, char **argv)
             }
             if (sse_fd >= 0) {
                 close(sse_fd);
-            }
-            if (key_fd >= 0) {
-                ioctl(key_fd, UI_DEV_DESTROY);
-                close(key_fd);
             }
             break;
         }
