@@ -253,13 +253,44 @@ static int parse_http_url(const char *url, char **host_out, char **port_out, cha
     if (host_len == 0) {
         return -1;
     }
-    const char *port_sep = memchr(host_start, ':', host_len);
-    const char *host_end = port_sep ? port_sep : path_start;
+    const char *port_sep = NULL;
+    const char *host_end = NULL;
+    if (host_start[0] == '[') {
+        const char *closing = memchr(host_start, ']', host_len);
+        if (!closing || closing == host_start + 1) {
+            return -1;
+        }
+        host_end = closing + 1;
+        if (host_end < path_start && *host_end == ':') {
+            port_sep = host_end;
+        }
+    } else {
+        port_sep = memchr(host_start, ':', host_len);
+        host_end = port_sep ? port_sep : path_start;
+    }
+    if (!host_end) {
+        host_end = path_start;
+    }
     size_t host_only_len = (size_t)(host_end - host_start);
-    char *host = strndup(host_start, host_only_len);
+    if (host_only_len == 0) {
+        return -1;
+    }
+    char *host = NULL;
+    if (host_start[0] == '[') {
+        if (host_only_len <= 2) {
+            return -1;
+        }
+        host = strndup(host_start + 1, host_only_len - 2);
+    } else {
+        host = strndup(host_start, host_only_len);
+    }
     char *port = NULL;
     if (port_sep && port_sep < path_start) {
         size_t port_len = (size_t)(path_start - port_sep - 1);
+        if (port_len == 0) {
+            free(host);
+            return -1;
+        }
         port = strndup(port_sep + 1, port_len);
     } else {
         port = strdup("80");
@@ -829,8 +860,10 @@ int main(int argc, char **argv)
     int old_flags = -1;
     int raw_ok = 0;
     struct termios old_term;
+    memset(&old_term, 0, sizeof(old_term));
     if (set_stdin_raw(&old_flags, &old_term) < 0) {
         fprintf(stderr, "Warning: failed to set stdin raw mode; keyboard triggers disabled.\n");
+        old_flags = -1;
     } else {
         fprintf(stderr, "Press configured keys to fire actions; Ctrl+C to exit.\n");
         raw_ok = 1;
