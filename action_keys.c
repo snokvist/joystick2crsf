@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/input.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdio.h>
@@ -79,6 +80,7 @@ typedef struct {
 typedef struct {
     int http_timeout_ms;
     int verbose;
+    char input_device[256];
     size_t action_count;
     action_t actions[ACTION_MAX];
 } config_t;
@@ -430,6 +432,7 @@ static void config_defaults(config_t *cfg)
 {
     cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
     cfg->verbose = 0;
+    memset(cfg->input_device, 0, sizeof(cfg->input_device));
     cfg->action_count = 0;
     memset(cfg->actions, 0, sizeof(cfg->actions));
     for (size_t i = 0; i < ACTION_MAX; i++) {
@@ -608,6 +611,8 @@ static int config_load(config_t *cfg, const char *path)
             }
         } else if (!strcasecmp(key, "verbose")) {
             cfg->verbose = atoi(val) ? 1 : 0;
+        } else if (!strcasecmp(key, "input_device")) {
+            snprintf(cfg->input_device, sizeof(cfg->input_device), "%s", val);
         } else if (!strncasecmp(key, "action_", 7)) {
             if (cfg->action_count >= ACTION_MAX) {
                 fprintf(stderr, "%s:%d: maximum of %d actions reached; ignoring\n",
@@ -680,6 +685,41 @@ static void handle_keycode(action_keycode_t code, char ch,
     }
 }
 
+static int map_evdev_key(int code, action_keycode_t *out_code, char *out_char)
+{
+    if (!out_code || !out_char) {
+        return -1;
+    }
+    *out_code = ACTION_KEY_NONE;
+    *out_char = 0;
+    switch (code) {
+    case KEY_UP: *out_code = ACTION_KEY_UP; return 0;
+    case KEY_DOWN: *out_code = ACTION_KEY_DOWN; return 0;
+    case KEY_LEFT: *out_code = ACTION_KEY_LEFT; return 0;
+    case KEY_RIGHT: *out_code = ACTION_KEY_RIGHT; return 0;
+    case KEY_ENTER:
+    case KEY_KPENTER: *out_code = ACTION_KEY_ENTER; return 0;
+    case KEY_SPACE: *out_code = ACTION_KEY_SPACE; return 0;
+    default: break;
+    }
+    if (code >= KEY_A && code <= KEY_Z) {
+        *out_code = ACTION_KEY_CHAR;
+        *out_char = (char)('a' + (code - KEY_A));
+        return 0;
+    }
+    if (code >= KEY_1 && code <= KEY_9) {
+        *out_code = ACTION_KEY_CHAR;
+        *out_char = (char)('1' + (code - KEY_1));
+        return 0;
+    }
+    if (code == KEY_0) {
+        *out_code = ACTION_KEY_CHAR;
+        *out_char = '0';
+        return 0;
+    }
+    return -1;
+}
+
 int main(int argc, char **argv)
 {
     const char *conf_path = DEFAULT_CONF;
@@ -710,6 +750,17 @@ int main(int argc, char **argv)
         bindings[i].udp_fd = -1;
     }
 
+    int input_fd = -1;
+    if (cfg.input_device[0]) {
+        input_fd = open(cfg.input_device, O_RDONLY | O_NONBLOCK);
+        if (input_fd < 0) {
+            fprintf(stderr, "Failed to open input device %s: %s\n",
+                    cfg.input_device, strerror(errno));
+        } else if (cfg.verbose) {
+            fprintf(stderr, "Listening for keys on %s\n", cfg.input_device);
+        }
+    }
+
     int old_flags = -1;
     struct termios old_term;
     if (set_stdin_raw(&old_flags, &old_term) < 0) {
@@ -719,11 +770,18 @@ int main(int argc, char **argv)
     }
 
     while (g_run) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(fileno(stdin), &rfds);
-        struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
-        int rc = select(fileno(stdin) + 1, &rfds, NULL, NULL, &tv);
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fileno(stdin), &rfds);
+    int max_fd = fileno(stdin);
+    if (input_fd >= 0) {
+        FD_SET(input_fd, &rfds);
+        if (input_fd > max_fd) {
+            max_fd = input_fd;
+        }
+    }
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+    int rc = select(max_fd + 1, &rfds, NULL, NULL, &tv);
         if (rc > 0 && FD_ISSET(fileno(stdin), &rfds)) {
             char buf[32];
             ssize_t n = read(fileno(stdin), buf, sizeof(buf));
@@ -764,9 +822,51 @@ int main(int argc, char **argv)
                 }
             }
         }
+        if (rc > 0 && input_fd >= 0 && FD_ISSET(input_fd, &rfds)) {
+            struct input_event ev[16];
+            ssize_t n = read(input_fd, ev, sizeof(ev));
+            if (n > 0) {
+                size_t count = (size_t)n / sizeof(struct input_event);
+                for (size_t i = 0; i < count; i++) {
+                    if (ev[i].type != EV_KEY) {
+                        continue;
+                    }
+                    if (ev[i].value != 1 && ev[i].value != 2) { /* press or repeat */
+                        continue;
+                    }
+                    action_keycode_t code;
+                    char ch;
+                    if (map_evdev_key(ev[i].code, &code, &ch) == 0) {
+                        handle_keycode(code, ch, &cfg, bindings);
+                        if (cfg.verbose) {
+                            const char *name = NULL;
+                            switch (code) {
+                            case ACTION_KEY_UP: name = "key up"; break;
+                            case ACTION_KEY_DOWN: name = "key down"; break;
+                            case ACTION_KEY_LEFT: name = "key left"; break;
+                            case ACTION_KEY_RIGHT: name = "key right"; break;
+                            case ACTION_KEY_ENTER: name = "key enter"; break;
+                            case ACTION_KEY_SPACE: name = "key space"; break;
+                            default: break;
+                            }
+                            if (name) {
+                                maybe_log(&cfg, NULL, name, 0);
+                            } else {
+                                char msg[32];
+                                snprintf(msg, sizeof(msg), "key '%c'", ch);
+                                maybe_log(&cfg, NULL, msg, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     restore_stdin(old_flags, &old_term);
+    if (input_fd >= 0) {
+        close(input_fd);
+    }
     for (size_t i = 0; i < ACTION_MAX; i++) {
         free_binding(&bindings[i]);
     }
