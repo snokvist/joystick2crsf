@@ -8,7 +8,6 @@
 #define _POSIX_C_SOURCE 200809L
 #define _GNU_SOURCE
 #include <ctype.h>
-#include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -21,6 +20,7 @@
 #include <sys/socket.h>
 #include <termios.h>
 #include <time.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #ifndef MSG_NOSIGNAL
@@ -74,8 +74,6 @@ typedef struct {
     int udp_fd;
     struct sockaddr_storage udp_addr;
     socklen_t udp_addrlen;
-    CURL *curl;
-    struct curl_slist *curl_headers;
 } action_binding_t;
 
 typedef struct {
@@ -195,13 +193,6 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
     return fd;
 }
 
-static size_t curl_discard_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
-{
-    (void)ptr;
-    (void)userdata;
-    return size * nmemb;
-}
-
 static void free_binding(action_binding_t *b)
 {
     if (!b) {
@@ -209,12 +200,6 @@ static void free_binding(action_binding_t *b)
     }
     if (b->udp_fd >= 0) {
         close(b->udp_fd);
-    }
-    if (b->curl) {
-        curl_easy_cleanup(b->curl);
-    }
-    if (b->curl_headers) {
-        curl_slist_free_all(b->curl_headers);
     }
     memset(b, 0, sizeof(*b));
     b->udp_fd = -1;
@@ -236,42 +221,6 @@ static int init_udp(action_binding_t *b)
     return b->udp_fd >= 0 ? 0 : -1;
 }
 
-static int init_http(action_binding_t *b)
-{
-    if (!b) {
-        return -1;
-    }
-    if (b->curl) {
-        return 0;
-    }
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        return -1;
-    }
-    curl_easy_setopt(curl, CURLOPT_URL, b->spec.destination);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)b->spec.timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_discard_cb);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "action_keys");
-    if (b->spec.method == ACTION_HTTP_POST) {
-        curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, b->spec.body);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)b->spec.body_len);
-    } else {
-        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
-    }
-    struct curl_slist *hdrs = NULL;
-    for (size_t i = 0; i < b->spec.header_count; i++) {
-        hdrs = curl_slist_append(hdrs, b->spec.headers[i]);
-    }
-    if (hdrs) {
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-    }
-    b->curl_headers = hdrs;
-    b->curl = curl;
-    return 0;
-}
-
 static int send_udp(action_binding_t *b)
 {
     if (!b) {
@@ -285,18 +234,173 @@ static int send_udp(action_binding_t *b)
     return (n < 0) ? -1 : 0;
 }
 
+static int parse_http_url(const char *url, char **host_out, char **port_out, char **path_out)
+{
+    const char *prefix = "http://";
+    size_t plen = strlen(prefix);
+    if (strncmp(url, prefix, plen) != 0) {
+        return -1;
+    }
+    const char *host_start = url + plen;
+    const char *path_start = strchr(host_start, '/');
+    if (!path_start) {
+        path_start = url + strlen(url);
+    }
+    size_t host_len = (size_t)(path_start - host_start);
+    if (host_len == 0) {
+        return -1;
+    }
+    const char *port_sep = memchr(host_start, ':', host_len);
+    const char *host_end = port_sep ? port_sep : path_start;
+    size_t host_only_len = (size_t)(host_end - host_start);
+    char *host = strndup(host_start, host_only_len);
+    char *port = NULL;
+    if (port_sep && port_sep < path_start) {
+        size_t port_len = (size_t)(path_start - port_sep - 1);
+        port = strndup(port_sep + 1, port_len);
+    } else {
+        port = strdup("80");
+    }
+    const char *path = (*path_start) ? path_start : "/";
+    char *path_copy = strdup(*path ? path : "/");
+    if (!host || !port || !path_copy) {
+        free(host);
+        free(port);
+        free(path_copy);
+        return -1;
+    }
+    *host_out = host;
+    *port_out = port;
+    *path_out = path_copy;
+    return 0;
+}
+
 static int send_http(action_binding_t *b)
 {
     if (!b) {
         return -1;
     }
-    if (init_http(b) < 0) {
+    char *host = NULL;
+    char *port = NULL;
+    char *path = NULL;
+    if (parse_http_url(b->spec.destination, &host, &port, &path) < 0) {
         return -1;
     }
-    CURLcode rc = curl_easy_perform(b->curl);
-    if (rc != CURLE_OK) {
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    int rc = getaddrinfo(host, port, &hints, &res);
+    if (rc != 0 || !res) {
+        free(host);
+        free(port);
+        free(path);
+        if (res) {
+            freeaddrinfo(res);
+        }
         return -1;
     }
+
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) {
+            continue;
+        }
+        struct timeval tv;
+        tv.tv_sec = b->spec.timeout_ms / 1000;
+        tv.tv_usec = (b->spec.timeout_ms % 1000) * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+            break;
+        }
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) {
+        free(host);
+        free(port);
+        free(path);
+        return -1;
+    }
+
+    char req[2048];
+    const char *method = (b->spec.method == ACTION_HTTP_POST) ? "POST" : "GET";
+    int written = snprintf(req, sizeof(req),
+                           "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: action_keys\r\n",
+                           method, path, host);
+    if (written < 0 || (size_t)written >= sizeof(req)) {
+        close(fd);
+        free(host);
+        free(port);
+        free(path);
+        return -1;
+    }
+    size_t off = (size_t)written;
+    for (size_t i = 0; i < b->spec.header_count && off < sizeof(req); i++) {
+        int n = snprintf(req + off, sizeof(req) - off, "%s\r\n", b->spec.headers[i]);
+        if (n < 0 || (size_t)n >= sizeof(req) - off) {
+            close(fd);
+            free(host);
+            free(port);
+            free(path);
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    if (b->spec.method == ACTION_HTTP_POST) {
+        int n = snprintf(req + off, sizeof(req) - off,
+                         "Content-Length: %zu\r\nContent-Type: application/json\r\n",
+                         b->spec.body_len);
+        if (n < 0 || (size_t)n >= sizeof(req) - off) {
+            close(fd);
+            free(host);
+            free(port);
+            free(path);
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    if (off + 2 >= sizeof(req)) {
+        close(fd);
+        free(host);
+        free(port);
+        free(path);
+        return -1;
+    }
+    req[off++] = '\r';
+    req[off++] = '\n';
+
+    ssize_t n = send(fd, req, off, MSG_NOSIGNAL);
+    if (n < 0) {
+        close(fd);
+        free(host);
+        free(port);
+        free(path);
+        return -1;
+    }
+    if (b->spec.method == ACTION_HTTP_POST && b->spec.body_len > 0) {
+        ssize_t nb = send(fd, b->spec.body, b->spec.body_len, MSG_NOSIGNAL);
+        if (nb < 0) {
+            close(fd);
+            free(host);
+            free(port);
+            free(path);
+            return -1;
+        }
+    }
+
+    char discard[512];
+    while (recv(fd, discard, sizeof(discard), 0) > 0) {
+    }
+    close(fd);
+    free(host);
+    free(port);
+    free(path);
     return 0;
 }
 
@@ -583,18 +687,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
-        fprintf(stderr, "Failed to initialize curl\n");
-        return 1;
-    }
-
     action_binding_t bindings[ACTION_MAX];
     memset(bindings, 0, sizeof(bindings));
     for (size_t i = 0; i < cfg.action_count && i < ACTION_MAX; i++) {
         bindings[i].spec = cfg.actions[i];
         bindings[i].udp_fd = -1;
-        bindings[i].curl = NULL;
-        bindings[i].curl_headers = NULL;
     }
 
     int old_flags = -1;
@@ -648,6 +745,5 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < ACTION_MAX; i++) {
         free_binding(&bindings[i]);
     }
-    curl_global_cleanup();
     return 0;
 }

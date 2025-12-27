@@ -17,13 +17,13 @@ JOYSTICK2CRSF_CONF ?= $(CONFDIR)/joystick2crsf.conf
 PKG_CONFIG ?= pkg-config
 SDL2_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags sdl2)
 SDL2_LIBS ?= $(shell $(PKG_CONFIG) --libs sdl2)
-CURL_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libcurl)
-CURL_LIBS ?= $(shell $(PKG_CONFIG) --libs libcurl)
+CURL_CFLAGS ?=
+CURL_LIBS ?=
 
 CFLAGS ?= -O2 -g -Wall -Wextra
 LDFLAGS ?=
 LIBS := $(SDL2_LIBS)
-LIBS_KEYS := $(CURL_LIBS)
+LIBS_KEYS :=
 
 INSTALL ?= install
 DESTDIR ?=
