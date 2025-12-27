@@ -415,9 +415,20 @@ static int dispatch(action_binding_t *b)
     return send_http(b);
 }
 
+static void maybe_log(const config_t *cfg, const action_t *spec, const char *event, int rc)
+{
+    if (!cfg || !cfg->verbose || !spec) {
+        return;
+    }
+    const char *transport = (spec->transport == ACTION_TRANSPORT_HTTP) ? "http" : "udp";
+    fprintf(stderr, "%s %s -> %s (%s)\n",
+            event, transport, spec->destination, rc == 0 ? "ok" : "fail");
+}
+
 static void config_defaults(config_t *cfg)
 {
     cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
+    cfg->verbose = 0;
     cfg->action_count = 0;
     memset(cfg->actions, 0, sizeof(cfg->actions));
     for (size_t i = 0; i < ACTION_MAX; i++) {
@@ -594,6 +605,8 @@ static int config_load(config_t *cfg, const char *path)
             if (cfg->http_timeout_ms <= 0) {
                 cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
             }
+        } else if (!strcasecmp(key, "verbose")) {
+            cfg->verbose = atoi(val) ? 1 : 0;
         } else if (!strncasecmp(key, "action_", 7)) {
             if (cfg->action_count >= ACTION_MAX) {
                 fprintf(stderr, "%s:%d: maximum of %d actions reached; ignoring\n",
@@ -657,9 +670,11 @@ static void handle_keycode(action_keycode_t code, char ch,
             continue;
         }
         if (a->key_code == ACTION_KEY_CHAR && code == ACTION_KEY_CHAR && a->key_char == ch) {
-            dispatch(&bindings[i]);
+            int rc = dispatch(&bindings[i]);
+            maybe_log(cfg, a, "action", rc);
         } else if (a->key_code == code && code != ACTION_KEY_CHAR) {
-            dispatch(&bindings[i]);
+            int rc = dispatch(&bindings[i]);
+            maybe_log(cfg, a, "action", rc);
         }
     }
 }
@@ -719,22 +734,31 @@ int main(int argc, char **argv)
                         unsigned char code = (unsigned char)buf[i + 1];
                         if (code == 'A') {
                             handle_keycode(ACTION_KEY_UP, 0, &cfg, bindings);
+                            maybe_log(&cfg, NULL, "key up", 0);
                         } else if (code == 'B') {
                             handle_keycode(ACTION_KEY_DOWN, 0, &cfg, bindings);
+                            maybe_log(&cfg, NULL, "key down", 0);
                         } else if (code == 'C') {
                             handle_keycode(ACTION_KEY_RIGHT, 0, &cfg, bindings);
+                            maybe_log(&cfg, NULL, "key right", 0);
                         } else if (code == 'D') {
                             handle_keycode(ACTION_KEY_LEFT, 0, &cfg, bindings);
+                            maybe_log(&cfg, NULL, "key left", 0);
                         }
                         i += 2;
                         continue;
                     }
                     if (c == '\r' || c == '\n') {
                         handle_keycode(ACTION_KEY_ENTER, 0, &cfg, bindings);
+                        maybe_log(&cfg, NULL, "key enter", 0);
                     } else if (c == ' ') {
                         handle_keycode(ACTION_KEY_SPACE, 0, &cfg, bindings);
+                        maybe_log(&cfg, NULL, "key space", 0);
                     } else {
                         handle_keycode(ACTION_KEY_CHAR, (char)c, &cfg, bindings);
+                        char msg[32];
+                        snprintf(msg, sizeof(msg), "key '%c'", c);
+                        maybe_log(&cfg, NULL, msg, 0);
                     }
                 }
             }
