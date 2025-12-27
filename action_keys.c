@@ -827,16 +827,18 @@ int main(int argc, char **argv)
     }
 
     int old_flags = -1;
+    int raw_ok = 0;
     struct termios old_term;
     if (set_stdin_raw(&old_flags, &old_term) < 0) {
         fprintf(stderr, "Warning: failed to set stdin raw mode; keyboard triggers disabled.\n");
     } else {
         fprintf(stderr, "Press configured keys to fire actions; Ctrl+C to exit.\n");
+        raw_ok = 1;
     }
 
     while (g_run) {
-    fd_set rfds;
-    FD_ZERO(&rfds);
+        fd_set rfds;
+        FD_ZERO(&rfds);
     FD_SET(fileno(stdin), &rfds);
     int max_fd = fileno(stdin);
     if (input_fd >= 0) {
@@ -909,7 +911,9 @@ int main(int argc, char **argv)
         }
     }
 
-    restore_stdin(old_flags, &old_term);
+    if (raw_ok) {
+        restore_stdin(old_flags, &old_term);
+    }
     if (input_fd >= 0) {
         close(input_fd);
     }
