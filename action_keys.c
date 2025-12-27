@@ -652,7 +652,7 @@ int action_keys_config_load(action_keys_config_t *cfg, const char *path)
                 cfg->action_count++;
             }
         } else {
-            fprintf(stderr, "%s:%d: unknown key '%s'\n", path, lineno, key);
+            /* Ignore unrelated keys so the action config can live inside joystick2crsf.conf. */
         }
     }
     fclose(fp);

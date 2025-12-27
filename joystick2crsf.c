@@ -1040,8 +1040,8 @@ static int config_load(config_t *cfg, const char *path)
                    !strncasecmp(key, "key_long", 8) ||
                    !strcasecmp(key, "key_debug")) {
             if (!warned_key_bindings) {
-                fprintf(stderr, "Deprecated key_* bindings are ignored; use action_keys.conf "
-                        "channel actions instead.\n");
+                fprintf(stderr, "Deprecated key_* bindings are ignored; use action_* channel "
+                        "actions instead.\n");
                 warned_key_bindings = 1;
             }
         } else {
@@ -1264,8 +1264,8 @@ int main(int argc, char **argv)
 
         action_keys_runtime_t action_keys;
         action_keys_runtime_init(&action_keys);
-        int action_conf_readable = (access(ACTION_KEYS_DEFAULT_CONF, R_OK) == 0);
-        action_keys_runtime_reload(&action_keys, ACTION_KEYS_DEFAULT_CONF,
+        int action_conf_readable = (access(conf_path, R_OK) == 0);
+        action_keys_runtime_reload(&action_keys, conf_path,
                                    !action_conf_readable && !action_keys_warned_missing);
         if (!action_conf_readable) {
             action_keys_warned_missing = 1;

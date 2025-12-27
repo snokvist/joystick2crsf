@@ -84,9 +84,10 @@ chattering while the stick settles.
 
 ## Action keys configuration
 
-`joystick2crsf` reads `/etc/action_keys.conf` when it is readable and fires UDP or HTTP actions
-whenever channel thresholds trip. Actions are bound to channels, edge (high/low), and press type
-(short/long) while reusing the same hysteresis and timing as the built-in key-trigger logic.
+`joystick2crsf` reads `action_*` entries from the main `/etc/joystick2crsf.conf` and fires UDP or
+HTTP actions whenever channel thresholds trip. Actions are bound to channels, edge (high/low), and
+press type (short/long) while reusing the same hysteresis and timing as the built-in key-trigger
+logic.
 
 Key features:
 
@@ -94,11 +95,11 @@ Key features:
 - Transports: `udp` (send payload verbatim) or `http` (`GET`/`POST` with optional headers).
 - Config fields: `destination`/`url`, `body`, `header`, and `timeout_ms`.
 
-Example config (`/etc/action_keys.conf`):
+Example config (inside `/etc/joystick2crsf.conf`):
 
 ```
 action_1=channel=5,edge=high,press=short,transport=udp,url=udp://10.0.0.2:9000,body={"ping":1}
 action_2=channel=6,edge=low,press=long,transport=http,url=http://10.0.0.2/api,method=POST,body={"cmd":"start"}
 ```
 
-Remove or rename the config file if you want to disable the action hooks.
+Delete or comment out the `action_*` lines if you want to disable the action hooks.

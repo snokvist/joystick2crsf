@@ -10,7 +10,7 @@
 #define ACTION_MAX_HEADERS             8
 #define ACTION_MAX_DEST_LEN            256
 #define ACTION_HTTP_TIMEOUT_MS_DEFAULT 1500
-#define ACTION_KEYS_DEFAULT_CONF       "/etc/action_keys.conf"
+#define ACTION_KEYS_DEFAULT_CONF       "/etc/joystick2crsf.conf"
 
 typedef enum {
     ACTION_TRANSPORT_UDP = 0,
