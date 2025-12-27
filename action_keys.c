@@ -78,6 +78,7 @@ typedef struct {
 
 typedef struct {
     int http_timeout_ms;
+    int verbose;
     size_t action_count;
     action_t actions[ACTION_MAX];
 } config_t;
