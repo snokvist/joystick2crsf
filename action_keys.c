@@ -460,102 +460,122 @@ static int parse_action(const config_t *cfg, const char *val, action_t *out,
         fprintf(stderr, "%s:%d: out of memory parsing action\n", path, lineno);
         return -1;
     }
-    char *save = NULL;
-    for (char *tok = strtok_r(dup, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
-        char *eq = strchr(tok, '=');
+    char *cursor = dup;
+    while (cursor && *cursor) {
+        while (*cursor == ',' || isspace((unsigned char)*cursor)) {
+            cursor++;
+        }
+        if (!*cursor) {
+            break;
+        }
+        char *key = cursor;
+        char *eq = strchr(key, '=');
         if (!eq || !eq[1]) {
-            fprintf(stderr, "%s:%d: action token '%s' missing '='\n", path, lineno, tok);
+            fprintf(stderr, "%s:%d: action token '%s' missing '='\n", path, lineno, key);
             free(dup);
             return -1;
         }
         *eq = '\0';
-        char *k = tok;
-        char *v = eq + 1;
-        trim(k);
-        trim(v);
-        if (!strcasecmp(k, "key")) {
-            if (!*v) {
+        char *val = eq + 1;
+        char *next = val;
+        int is_body = (!strcasecmp(key, "body") || !strcasecmp(key, "payload"));
+        if (!is_body) {
+            char *comma = strchr(val, ',');
+            if (comma) {
+                *comma = '\0';
+                cursor = comma + 1;
+            } else {
+                cursor = val + strlen(val);
+            }
+        } else {
+            cursor = val + strlen(val);
+        }
+        trim(key);
+        trim(val);
+        if (!strcasecmp(key, "key")) {
+            if (!*val) {
                 fprintf(stderr, "%s:%d: action key cannot be empty\n", path, lineno);
                 free(dup);
                 return -1;
             }
-            if (!strcasecmp(v, "up")) {
+            if (!strcasecmp(val, "up")) {
                 tmp.key_code = ACTION_KEY_UP;
-            } else if (!strcasecmp(v, "down")) {
+            } else if (!strcasecmp(val, "down")) {
                 tmp.key_code = ACTION_KEY_DOWN;
-            } else if (!strcasecmp(v, "left")) {
+            } else if (!strcasecmp(val, "left")) {
                 tmp.key_code = ACTION_KEY_LEFT;
-            } else if (!strcasecmp(v, "right")) {
+            } else if (!strcasecmp(val, "right")) {
                 tmp.key_code = ACTION_KEY_RIGHT;
-            } else if (!strcasecmp(v, "enter") || !strcasecmp(v, "return")) {
+            } else if (!strcasecmp(val, "enter") || !strcasecmp(val, "return")) {
                 tmp.key_code = ACTION_KEY_ENTER;
-            } else if (!strcasecmp(v, "space") || !strcasecmp(v, "spacebar")) {
+            } else if (!strcasecmp(val, "space") || !strcasecmp(val, "spacebar")) {
                 tmp.key_code = ACTION_KEY_SPACE;
             } else {
                 tmp.key_code = ACTION_KEY_CHAR;
-                tmp.key_char = v[0];
+                tmp.key_char = val[0];
             }
-        } else if (!strcasecmp(k, "transport")) {
-            if (!strcasecmp(v, "udp")) {
+        } else if (!strcasecmp(key, "transport")) {
+            if (!strcasecmp(val, "udp")) {
                 tmp.transport = ACTION_TRANSPORT_UDP;
-            } else if (!strcasecmp(v, "http")) {
+            } else if (!strcasecmp(val, "http")) {
                 tmp.transport = ACTION_TRANSPORT_HTTP;
             } else {
                 fprintf(stderr, "%s:%d: transport must be udp or http\n", path, lineno);
                 free(dup);
                 return -1;
             }
-        } else if (!strcasecmp(k, "method")) {
-            if (!strcasecmp(v, "get")) {
+        } else if (!strcasecmp(key, "method")) {
+            if (!strcasecmp(val, "get")) {
                 tmp.method = ACTION_HTTP_GET;
-            } else if (!strcasecmp(v, "post")) {
+            } else if (!strcasecmp(val, "post")) {
                 tmp.method = ACTION_HTTP_POST;
             } else {
                 fprintf(stderr, "%s:%d: method must be GET or POST\n", path, lineno);
                 free(dup);
                 return -1;
             }
-        } else if (!strcasecmp(k, "url") || !strcasecmp(k, "destination") ||
-                   !strcasecmp(k, "dest")) {
-            if (strlen(v) >= ACTION_MAX_DEST_LEN) {
+        } else if (!strcasecmp(key, "url") || !strcasecmp(key, "destination") ||
+                   !strcasecmp(key, "dest")) {
+            if (strlen(val) >= ACTION_MAX_DEST_LEN) {
                 fprintf(stderr, "%s:%d: destination too long (max %d)\n",
                         path, lineno, ACTION_MAX_DEST_LEN - 1);
                 free(dup);
                 return -1;
             }
-            snprintf(tmp.destination, sizeof(tmp.destination), "%s", v);
-        } else if (!strcasecmp(k, "body") || !strcasecmp(k, "payload")) {
-            size_t len = strlen(v);
+            snprintf(tmp.destination, sizeof(tmp.destination), "%s", val);
+        } else if (!strcasecmp(key, "body") || !strcasecmp(key, "payload")) {
+            size_t len = strlen(val);
             if (len >= ACTION_MAX_BODY_LEN) {
                 fprintf(stderr, "%s:%d: body too long (max %d)\n",
                         path, lineno, ACTION_MAX_BODY_LEN - 1);
                 free(dup);
                 return -1;
             }
-            snprintf(tmp.body, sizeof(tmp.body), "%s", v);
+            snprintf(tmp.body, sizeof(tmp.body), "%s", val);
             tmp.body_len = len;
-        } else if (!strcasecmp(k, "header")) {
+            break; /* body consumes the rest of the line */
+        } else if (!strcasecmp(key, "header")) {
             if (tmp.header_count >= ACTION_MAX_HEADERS) {
                 fprintf(stderr, "%s:%d: too many headers (max %d)\n",
                         path, lineno, ACTION_MAX_HEADERS);
                 free(dup);
                 return -1;
             }
-            if (strlen(v) >= ACTION_MAX_HEADER_LEN) {
+            if (strlen(val) >= ACTION_MAX_HEADER_LEN) {
                 fprintf(stderr, "%s:%d: header too long (max %d)\n",
                         path, lineno, ACTION_MAX_HEADER_LEN - 1);
                 free(dup);
                 return -1;
             }
-            snprintf(tmp.headers[tmp.header_count], sizeof(tmp.headers[0]), "%s", v);
+            snprintf(tmp.headers[tmp.header_count], sizeof(tmp.headers[0]), "%s", val);
             tmp.header_count++;
-        } else if (!strcasecmp(k, "timeout_ms")) {
-            tmp.timeout_ms = atoi(v);
+        } else if (!strcasecmp(key, "timeout_ms")) {
+            tmp.timeout_ms = atoi(val);
             if (tmp.timeout_ms <= 0) {
                 tmp.timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
             }
         } else {
-            fprintf(stderr, "%s:%d: unknown action field '%s'\n", path, lineno, k);
+            fprintf(stderr, "%s:%d: unknown action field '%s'\n", path, lineno, key);
             free(dup);
             return -1;
         }
