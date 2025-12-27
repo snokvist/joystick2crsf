@@ -420,12 +420,16 @@ static int dispatch(action_binding_t *b)
 
 static void maybe_log(const config_t *cfg, const action_t *spec, const char *event, int rc)
 {
-    if (!cfg || !cfg->verbose || !spec) {
+    if (!cfg || !cfg->verbose) {
         return;
     }
-    const char *transport = (spec->transport == ACTION_TRANSPORT_HTTP) ? "http" : "udp";
-    fprintf(stderr, "%s %s -> %s (%s)\n",
-            event, transport, spec->destination, rc == 0 ? "ok" : "fail");
+    if (spec) {
+        const char *transport = (spec->transport == ACTION_TRANSPORT_HTTP) ? "http" : "udp";
+        fprintf(stderr, "%s %s -> %s (%s)\n",
+                event, transport, spec->destination, rc == 0 ? "ok" : "fail");
+    } else {
+        fprintf(stderr, "%s\n", event);
+    }
 }
 
 static void config_defaults(config_t *cfg)
@@ -690,6 +694,27 @@ static void restore_stdin(int old_flags, const struct termios *old_term)
 static void handle_keycode(action_keycode_t code, char ch,
                            const config_t *cfg, action_binding_t bindings[ACTION_MAX])
 {
+    if (cfg && cfg->verbose) {
+        const char *name = NULL;
+        char msg[32];
+        switch (code) {
+        case ACTION_KEY_UP: name = "key up"; break;
+        case ACTION_KEY_DOWN: name = "key down"; break;
+        case ACTION_KEY_LEFT: name = "key left"; break;
+        case ACTION_KEY_RIGHT: name = "key right"; break;
+        case ACTION_KEY_ENTER: name = "key enter"; break;
+        case ACTION_KEY_SPACE: name = "key space"; break;
+        default:
+            if (code == ACTION_KEY_CHAR) {
+                snprintf(msg, sizeof(msg), "key '%c'", ch ? ch : '?');
+                name = msg;
+            }
+            break;
+        }
+        if (name) {
+            maybe_log(cfg, NULL, name, 0);
+        }
+    }
     for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
         const action_t *a = &cfg->actions[i];
         if (a->key_code == ACTION_KEY_NONE) {
@@ -858,25 +883,6 @@ int main(int argc, char **argv)
                     char ch;
                     if (map_evdev_key(ev[i].code, &code, &ch) == 0) {
                         handle_keycode(code, ch, &cfg, bindings);
-                        if (cfg.verbose) {
-                            const char *name = NULL;
-                            switch (code) {
-                            case ACTION_KEY_UP: name = "key up"; break;
-                            case ACTION_KEY_DOWN: name = "key down"; break;
-                            case ACTION_KEY_LEFT: name = "key left"; break;
-                            case ACTION_KEY_RIGHT: name = "key right"; break;
-                            case ACTION_KEY_ENTER: name = "key enter"; break;
-                            case ACTION_KEY_SPACE: name = "key space"; break;
-                            default: break;
-                            }
-                            if (name) {
-                                maybe_log(&cfg, NULL, name, 0);
-                            } else {
-                                char msg[32];
-                                snprintf(msg, sizeof(msg), "key '%c'", ch);
-                                maybe_log(&cfg, NULL, msg, 0);
-                            }
-                        }
                     }
                 }
             }
