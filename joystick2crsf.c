@@ -18,6 +18,8 @@
 #define _GNU_SOURCE
 #include <SDL2/SDL.h>
 
+#include "action_keys.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -123,6 +125,12 @@ typedef struct {
     int key_long_threshold_ms;
     int key_debug;
 } config_t;
+
+typedef struct {
+    action_keys_config_t cfg;
+    action_binding_t bindings[ACTION_MAX];
+    int enabled;
+} action_keys_runtime_t;
 
 /* ------------------------------------------------------------------------- */
 static volatile int g_run = 1;
@@ -1413,6 +1421,64 @@ static void reset_key_tracking(int key_active[16], int key_low_active[16],
     memset(key_low_start, 0, sizeof(struct timespec) * 16);
 }
 
+static void action_keys_runtime_init(action_keys_runtime_t *ak)
+{
+    if (!ak) {
+        return;
+    }
+    memset(ak, 0, sizeof(*ak));
+    for (size_t i = 0; i < ACTION_MAX; i++) {
+        ak->bindings[i].udp_fd = -1;
+    }
+}
+
+static void action_keys_runtime_reload(action_keys_runtime_t *ak,
+                                       const char *path,
+                                       int warn_missing)
+{
+    if (!ak) {
+        return;
+    }
+
+    action_keys_free_bindings(ak->bindings);
+    for (size_t i = 0; i < ACTION_MAX; i++) {
+        ak->bindings[i].udp_fd = -1;
+    }
+
+    if (path && access(path, R_OK) != 0) {
+        if (warn_missing) {
+            fprintf(stderr, "Action keys disabled: cannot read %s (%s)\n",
+                    path, strerror(errno));
+        }
+        memset(&ak->cfg, 0, sizeof(ak->cfg));
+        ak->enabled = 0;
+        return;
+    }
+
+    action_keys_config_defaults(&ak->cfg);
+    if (action_keys_config_load(&ak->cfg, path) == 0 && ak->cfg.action_count > 0) {
+        action_keys_bindings_init(&ak->cfg, ak->bindings);
+        ak->enabled = 1;
+        if (ak->cfg.verbose) {
+            fprintf(stderr, "Action keys ready (%zu bindings)\n", ak->cfg.action_count);
+        }
+    } else {
+        ak->enabled = 0;
+    }
+}
+
+static void action_keys_dispatch_evdev(action_keys_runtime_t *ak, uint16_t key_code)
+{
+    if (!ak || !ak->enabled) {
+        return;
+    }
+    action_keycode_t code;
+    char ch;
+    if (action_keys_map_evdev_key((int)key_code, &code, &ch) == 0) {
+        action_keys_handle_keycode(code, ch, &ak->cfg, ak->bindings);
+    }
+}
+
 /* ------------------------------- Main -------------------------------------- */
 int main(int argc, char **argv)
 {
@@ -1445,6 +1511,7 @@ int main(int argc, char **argv)
 
     int exit_code = 0;
     int startup_delay_applied = 0;
+    int action_keys_warned_missing = 0;
 
     try_rt(10);
 
@@ -1461,6 +1528,15 @@ int main(int argc, char **argv)
             break;
         }
 
+        action_keys_runtime_t action_keys;
+        action_keys_runtime_init(&action_keys);
+        int action_conf_readable = (access(ACTION_KEYS_DEFAULT_CONF, R_OK) == 0);
+        action_keys_runtime_reload(&action_keys, ACTION_KEYS_DEFAULT_CONF,
+                                   !action_conf_readable && !action_keys_warned_missing);
+        if (!action_conf_readable) {
+            action_keys_warned_missing = 1;
+        }
+
         if (!startup_delay_applied && cfg.startup_delay > 0) {
             fprintf(stderr, "Startup delay %d seconds before device discovery...\n",
                     cfg.startup_delay);
@@ -1470,19 +1546,22 @@ int main(int argc, char **argv)
         }
 
         int key_fd = -1;
-        int key_enabled = 0;
+        int key_fd_available = 0;
+        int key_bindings_present = 0;
         for (int i = 0; i < 16; i++) {
             if (cfg.key_short[i] >= 0 || cfg.key_long[i] >= 0 ||
                 cfg.key_short_low[i] >= 0 || cfg.key_long_low[i] >= 0) {
-                key_enabled = 1;
+                key_bindings_present = 1;
                 break;
             }
         }
-        if (key_enabled) {
+        if (key_bindings_present) {
             key_fd = uinput_open_keyboard();
             if (key_fd < 0) {
-                fprintf(stderr, "Keyboard bindings requested but /dev/uinput is unavailable; disabling.\n");
-                key_enabled = 0;
+                fprintf(stderr, "Keyboard bindings requested but /dev/uinput is unavailable; "
+                        "skipping virtual key output.\n");
+            } else {
+                key_fd_available = 1;
             }
         }
 
@@ -1884,7 +1963,7 @@ int main(int argc, char **argv)
                 }
             }
 
-            if (key_enabled && key_fd >= 0) {
+            if (key_bindings_present) {
                 for (int i = 0; i < 16; i++) {
                     if (cfg.key_short[i] >= 0 || cfg.key_long[i] >= 0) {
                         int pressed = ch_out[i] >= KEY_TRIGGER_HIGH;
@@ -1904,7 +1983,10 @@ int main(int argc, char **argv)
                                 code = cfg.key_long[i];
                             }
                             if (code >= 0) {
-                                uinput_send_key(key_fd, (uint16_t)code);
+                                if (key_fd_available) {
+                                    uinput_send_key(key_fd, (uint16_t)code);
+                                }
+                                action_keys_dispatch_evdev(&action_keys, (uint16_t)code);
                                 if (cfg.key_debug) {
                                     const char *kind = (held >= cfg.key_long_threshold_ms) ? "long" : "short";
                                     fprintf(stderr, "CH%d %s press (%lld ms) -> key %s\n",
@@ -1933,7 +2015,10 @@ int main(int argc, char **argv)
                                 code = cfg.key_long_low[i];
                             }
                             if (code >= 0) {
-                                uinput_send_key(key_fd, (uint16_t)code);
+                                if (key_fd_available) {
+                                    uinput_send_key(key_fd, (uint16_t)code);
+                                }
+                                action_keys_dispatch_evdev(&action_keys, (uint16_t)code);
                                 if (cfg.key_debug) {
                                     const char *kind = (held >= cfg.key_long_threshold_ms) ? "long" : "short";
                                     fprintf(stderr, "CH%d low %s press (%lld ms) -> key %s\n",
@@ -2086,6 +2171,7 @@ int main(int argc, char **argv)
             close(key_fd);
             key_fd = -1;
         }
+        action_keys_free_bindings(action_keys.bindings);
 
         if (fatal_error || !g_run) {
             break;

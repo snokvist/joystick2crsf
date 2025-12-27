@@ -1,93 +1,30 @@
 /**
  * action_keys.c - simple hotkey-driven UDP/HTTP action dispatcher
  *
- * Reads actions from a config file and fires them when matching keyboard keys
- * (stdin raw mode) are pressed.
+ * Shared config parser and dispatcher for key-driven UDP/HTTP actions.
  */
 
 #define _POSIX_C_SOURCE 200809L
 #define _GNU_SOURCE
+#include "action_keys.h"
+
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <linux/input.h>
 #include <netdb.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/select.h>
 #include <sys/socket.h>
-#include <termios.h>
 #include <time.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <linux/input.h>
+
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
-
-#define ACTION_MAX            32
-#define ACTION_MAX_BODY_LEN   512
-#define ACTION_MAX_HEADER_LEN 128
-#define ACTION_MAX_HEADERS    8
-#define ACTION_MAX_DEST_LEN   256
-#define ACTION_HTTP_TIMEOUT_MS_DEFAULT 1500
-#define DEFAULT_CONF "/etc/action_keys.conf"
-
-typedef enum {
-    ACTION_TRANSPORT_UDP = 0,
-    ACTION_TRANSPORT_HTTP
-} action_transport_t;
-
-typedef enum {
-    ACTION_HTTP_GET = 0,
-    ACTION_HTTP_POST
-} action_http_method_t;
-
-typedef enum {
-    ACTION_KEY_NONE = 0,
-    ACTION_KEY_CHAR,
-    ACTION_KEY_UP,
-    ACTION_KEY_DOWN,
-    ACTION_KEY_LEFT,
-    ACTION_KEY_RIGHT,
-    ACTION_KEY_ENTER,
-    ACTION_KEY_SPACE
-} action_keycode_t;
-
-typedef struct {
-    action_keycode_t key_code;     /* special keys or printable char */
-    char key_char;                 /* valid when key_code == ACTION_KEY_CHAR */
-    action_transport_t transport;
-    action_http_method_t method;
-    char destination[ACTION_MAX_DEST_LEN];
-    char body[ACTION_MAX_BODY_LEN];
-    size_t body_len;
-    char headers[ACTION_MAX_HEADERS][ACTION_MAX_HEADER_LEN];
-    size_t header_count;
-    int timeout_ms;
-} action_t;
-
-typedef struct {
-    action_t spec;
-    int udp_fd;
-    struct sockaddr_storage udp_addr;
-    socklen_t udp_addrlen;
-} action_binding_t;
-
-typedef struct {
-    int http_timeout_ms;
-    int verbose;
-    char input_device[256];
-    size_t action_count;
-    action_t actions[ACTION_MAX];
-} config_t;
-
-static volatile int g_run = 1;
-
-static void on_sigint(int sig){ (void)sig; g_run = 0; }
 
 static void trim(char *s)
 {
@@ -206,6 +143,31 @@ static void free_binding(action_binding_t *b)
     }
     memset(b, 0, sizeof(*b));
     b->udp_fd = -1;
+}
+
+void action_keys_bindings_init(const action_keys_config_t *cfg,
+                               action_binding_t bindings[ACTION_MAX])
+{
+    if (!cfg || !bindings) {
+        return;
+    }
+    for (size_t i = 0; i < ACTION_MAX; i++) {
+        memset(&bindings[i], 0, sizeof(action_binding_t));
+        bindings[i].udp_fd = -1;
+    }
+    for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
+        bindings[i].spec = cfg->actions[i];
+    }
+}
+
+void action_keys_free_bindings(action_binding_t bindings[ACTION_MAX])
+{
+    if (!bindings) {
+        return;
+    }
+    for (size_t i = 0; i < ACTION_MAX; i++) {
+        free_binding(&bindings[i]);
+    }
 }
 
 static int init_udp(action_binding_t *b)
@@ -449,7 +411,10 @@ static int dispatch(action_binding_t *b)
     return send_http(b);
 }
 
-static void maybe_log(const config_t *cfg, const action_t *spec, const char *event, int rc)
+static void maybe_log(const action_keys_config_t *cfg,
+                      const action_spec_t *spec,
+                      const char *event,
+                      int rc)
 {
     if (!cfg || !cfg->verbose) {
         return;
@@ -463,7 +428,7 @@ static void maybe_log(const config_t *cfg, const action_t *spec, const char *eve
     }
 }
 
-static void config_defaults(config_t *cfg)
+void action_keys_config_defaults(action_keys_config_t *cfg)
 {
     cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
     cfg->verbose = 1;
@@ -476,13 +441,13 @@ static void config_defaults(config_t *cfg)
     }
 }
 
-static int parse_action(const config_t *cfg, const char *val, action_t *out,
+static int parse_action(const action_keys_config_t *cfg, const char *val, action_spec_t *out,
                         const char *path, int lineno)
 {
     if (!cfg || !val || !out) {
         return -1;
     }
-    action_t tmp;
+    action_spec_t tmp;
     memset(&tmp, 0, sizeof(tmp));
     tmp.key_code = ACTION_KEY_NONE;
     tmp.key_char = 0;
@@ -629,7 +594,7 @@ static int parse_action(const config_t *cfg, const char *val, action_t *out,
     return 0;
 }
 
-static int config_load(config_t *cfg, const char *path)
+int action_keys_config_load(action_keys_config_t *cfg, const char *path)
 {
     FILE *fp = fopen(path, "r");
     if (!fp) {
@@ -685,45 +650,9 @@ static int config_load(config_t *cfg, const char *path)
     return 0;
 }
 
-static int set_stdin_raw(int *old_flags, struct termios *old_term)
-{
-    if (!old_flags || !old_term) {
-        return -1;
-    }
-    int fd = fileno(stdin);
-    *old_flags = fcntl(fd, F_GETFL, 0);
-    if (*old_flags < 0) {
-        return -1;
-    }
-    if (fcntl(fd, F_SETFL, *old_flags | O_NONBLOCK) < 0) {
-        return -1;
-    }
-    if (tcgetattr(fd, old_term) < 0) {
-        return -1;
-    }
-    struct termios raw = *old_term;
-    raw.c_lflag &= ~(ICANON | ECHO);
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 0;
-    if (tcsetattr(fd, TCSANOW, &raw) < 0) {
-        return -1;
-    }
-    return 0;
-}
-
-static void restore_stdin(int old_flags, const struct termios *old_term)
-{
-    int fd = fileno(stdin);
-    if (old_flags >= 0) {
-        fcntl(fd, F_SETFL, old_flags);
-    }
-    if (old_term) {
-        tcsetattr(fd, TCSANOW, old_term);
-    }
-}
-
-static void handle_keycode(action_keycode_t code, char ch,
-                           const config_t *cfg, action_binding_t bindings[ACTION_MAX])
+void action_keys_handle_keycode(action_keycode_t code, char ch,
+                                const action_keys_config_t *cfg,
+                                action_binding_t bindings[ACTION_MAX])
 {
     if (cfg && cfg->verbose) {
         const char *name = NULL;
@@ -747,7 +676,7 @@ static void handle_keycode(action_keycode_t code, char ch,
         }
     }
     for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
-        const action_t *a = &cfg->actions[i];
+        const action_spec_t *a = &cfg->actions[i];
         if (a->key_code == ACTION_KEY_NONE) {
             continue;
         }
@@ -761,7 +690,7 @@ static void handle_keycode(action_keycode_t code, char ch,
     }
 }
 
-static int map_evdev_key(int code, action_keycode_t *out_code, char *out_char)
+int action_keys_map_evdev_key(int code, action_keycode_t *out_code, char *out_char)
 {
     if (!out_code || !out_char) {
         return -1;
@@ -814,144 +743,4 @@ static int map_evdev_key(int code, action_keycode_t *out_code, char *out_char)
     case KEY_Z: *out_code = ACTION_KEY_CHAR; *out_char = 'z'; return 0;
     default: return -1;
     }
-}
-
-int main(int argc, char **argv)
-{
-    const char *conf_path = DEFAULT_CONF;
-    if (argc > 2) {
-        fprintf(stderr, "Usage: %s [config_path]\n", argv[0]);
-        return 1;
-    }
-    if (argc == 2) {
-        conf_path = argv[1];
-    }
-
-    signal(SIGINT, on_sigint);
-
-    config_t cfg;
-    config_defaults(&cfg);
-    if (config_load(&cfg, conf_path) < 0) {
-        return 1;
-    }
-    if (cfg.action_count == 0) {
-        fprintf(stderr, "No actions configured; exiting.\n");
-        return 1;
-    }
-
-    action_binding_t bindings[ACTION_MAX];
-    memset(bindings, 0, sizeof(bindings));
-    for (size_t i = 0; i < cfg.action_count && i < ACTION_MAX; i++) {
-        bindings[i].spec = cfg.actions[i];
-        bindings[i].udp_fd = -1;
-    }
-
-    int input_fd = -1;
-    if (cfg.input_device[0]) {
-        input_fd = open(cfg.input_device, O_RDONLY | O_NONBLOCK);
-        if (input_fd < 0) {
-            fprintf(stderr, "Failed to open input device %s: %s\n",
-                    cfg.input_device, strerror(errno));
-        } else if (cfg.verbose) {
-            fprintf(stderr, "Listening for keys on %s\n", cfg.input_device);
-        }
-    }
-
-    int old_flags = -1;
-    int raw_ok = 0;
-    struct termios old_term;
-    memset(&old_term, 0, sizeof(old_term));
-    if (set_stdin_raw(&old_flags, &old_term) < 0) {
-        fprintf(stderr, "Warning: failed to set stdin raw mode; keyboard triggers disabled.\n");
-        old_flags = -1;
-    } else {
-        fprintf(stderr, "Press configured keys to fire actions; Ctrl+C to exit.\n");
-        raw_ok = 1;
-    }
-
-    while (g_run) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-    FD_SET(fileno(stdin), &rfds);
-    int max_fd = fileno(stdin);
-    if (input_fd >= 0) {
-        FD_SET(input_fd, &rfds);
-        if (input_fd > max_fd) {
-            max_fd = input_fd;
-        }
-    }
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
-    int rc = select(max_fd + 1, &rfds, NULL, NULL, &tv);
-        if (rc > 0 && FD_ISSET(fileno(stdin), &rfds)) {
-            char buf[32];
-            ssize_t n = read(fileno(stdin), buf, sizeof(buf));
-            if (n > 0) {
-                ssize_t i = 0;
-                while (i < n) {
-                    unsigned char c = (unsigned char)buf[i++];
-                    if (c == 0x1B && i + 1 < n && buf[i] == '[') {
-                        unsigned char code = (unsigned char)buf[i + 1];
-                        if (code == 'A') {
-                            handle_keycode(ACTION_KEY_UP, 0, &cfg, bindings);
-                            maybe_log(&cfg, NULL, "key up", 0);
-                        } else if (code == 'B') {
-                            handle_keycode(ACTION_KEY_DOWN, 0, &cfg, bindings);
-                            maybe_log(&cfg, NULL, "key down", 0);
-                        } else if (code == 'C') {
-                            handle_keycode(ACTION_KEY_RIGHT, 0, &cfg, bindings);
-                            maybe_log(&cfg, NULL, "key right", 0);
-                        } else if (code == 'D') {
-                            handle_keycode(ACTION_KEY_LEFT, 0, &cfg, bindings);
-                            maybe_log(&cfg, NULL, "key left", 0);
-                        }
-                        i += 2;
-                        continue;
-                    }
-                    if (c == '\r' || c == '\n') {
-                        handle_keycode(ACTION_KEY_ENTER, 0, &cfg, bindings);
-                        maybe_log(&cfg, NULL, "key enter", 0);
-                    } else if (c == ' ') {
-                        handle_keycode(ACTION_KEY_SPACE, 0, &cfg, bindings);
-                        maybe_log(&cfg, NULL, "key space", 0);
-                    } else {
-                        handle_keycode(ACTION_KEY_CHAR, (char)c, &cfg, bindings);
-                        char msg[32];
-                        snprintf(msg, sizeof(msg), "key '%c'", c);
-                        maybe_log(&cfg, NULL, msg, 0);
-                    }
-                }
-            }
-        }
-        if (rc > 0 && input_fd >= 0 && FD_ISSET(input_fd, &rfds)) {
-            struct input_event ev[16];
-            ssize_t n = read(input_fd, ev, sizeof(ev));
-            if (n > 0) {
-                size_t count = (size_t)n / sizeof(struct input_event);
-                for (size_t i = 0; i < count; i++) {
-                    if (ev[i].type != EV_KEY) {
-                        continue;
-                    }
-                    if (ev[i].value != 1 && ev[i].value != 2) { /* press or repeat */
-                        continue;
-                    }
-                    action_keycode_t code;
-                    char ch;
-                    if (map_evdev_key(ev[i].code, &code, &ch) == 0) {
-                        handle_keycode(code, ch, &cfg, bindings);
-                    }
-                }
-            }
-        }
-    }
-
-    if (raw_ok) {
-        restore_stdin(old_flags, &old_term);
-    }
-    if (input_fd >= 0) {
-        close(input_fd);
-    }
-    for (size_t i = 0; i < ACTION_MAX; i++) {
-        free_binding(&bindings[i]);
-    }
-    return 0;
 }

@@ -91,14 +91,17 @@ release at 1500, leaving a 200-count hysteresis. Low-edge presses mirror that ar
 minimum: they trigger at 283 (1811 symmetrical to 1700) and release at 483, keeping the same gap
 to avoid chattering while the stick settles.
 
-## action_keys helper
+## Action keys configuration
 
-`action_keys` is a small helper binary that fires UDP or HTTP actions when keys are pressed. It is
-configured separately from `joystick2crsf` and ignores joystick state. Key features:
+`joystick2crsf` reads `/etc/action_keys.conf` when it is readable and fires UDP or HTTP actions
+whenever channel-based key bindings trigger. You can keep actions in that separate file while the
+runtime drives them directly, avoiding the extra input-polling helper.
 
-- Bind actions to stdin characters (`key=...`); feed it with real keyboard input or any process that
-  injects keypresses (including the main joystick2crsf uinput events). Special names `up`, `down`,
-  `left`, `right`, `enter`/`return`, and `space`/`spacebar` are also supported.
+Key features:
+
+- Bind actions to logical keys (`key=...`) referenced by `key_short_N`/`key_long_N` (and `_low`
+  variants). Names `up`, `down`, `left`, `right`, `enter`/`return`, `space`/`spacebar`, `a`–`z`,
+  and `0`–`9` are supported.
 - Transports: `udp` (send payload verbatim) or `http` (`GET`/`POST` with optional headers).
 - Config fields: `destination`/`url`, `body`, `header`, and `timeout_ms`.
 
@@ -109,5 +112,5 @@ action_1=key=a,transport=udp,url=udp://10.0.0.2:9000,body={"ping":1}
 action_2=key=b,transport=http,url=http://10.0.0.2/api,method=POST,body={"cmd":"start"}
 ```
 
-Run `action_keys /path/to/config` and press the configured keys to dispatch actions; use `Ctrl+C`
-to exit.
+The dispatch runs even when `/dev/uinput` is unavailable, so remove or rename the config file if you
+want to disable the action hooks.
