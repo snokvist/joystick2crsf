@@ -1,7 +1,7 @@
 /**
- * action_keys.c - simple hotkey-driven UDP/HTTP action dispatcher
+ * action_keys.c - UDP/HTTP action dispatcher for joystick2crsf
  *
- * Shared config parser and dispatcher for key-driven UDP/HTTP actions.
+ * Shared config parser and dispatcher for channel-driven UDP/HTTP actions.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -19,8 +19,6 @@
 #include <time.h>
 #include <sys/time.h>
 #include <unistd.h>
-
-#include <linux/input.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -432,12 +430,12 @@ void action_keys_config_defaults(action_keys_config_t *cfg)
 {
     cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
     cfg->verbose = 1;
-    snprintf(cfg->input_device, sizeof(cfg->input_device), "%s", "/dev/input/joystick2crsf-keys");
     cfg->action_count = 0;
     memset(cfg->actions, 0, sizeof(cfg->actions));
     for (size_t i = 0; i < ACTION_MAX; i++) {
-        cfg->actions[i].key_code = ACTION_KEY_NONE;
-        cfg->actions[i].key_char = 0;
+        cfg->actions[i].channel = -1;
+        cfg->actions[i].edge = ACTION_EDGE_HIGH;
+        cfg->actions[i].press = ACTION_PRESS_ANY;
     }
 }
 
@@ -449,8 +447,9 @@ static int parse_action(const action_keys_config_t *cfg, const char *val, action
     }
     action_spec_t tmp;
     memset(&tmp, 0, sizeof(tmp));
-    tmp.key_code = ACTION_KEY_NONE;
-    tmp.key_char = 0;
+    tmp.channel = -1;
+    tmp.edge = ACTION_EDGE_HIGH;
+    tmp.press = ACTION_PRESS_ANY;
     tmp.transport = ACTION_TRANSPORT_UDP;
     tmp.method = ACTION_HTTP_GET;
     tmp.timeout_ms = cfg->http_timeout_ms;
@@ -492,27 +491,35 @@ static int parse_action(const action_keys_config_t *cfg, const char *val, action
         }
         trim(key);
         trim(val);
-        if (!strcasecmp(key, "key")) {
-            if (!*val) {
-                fprintf(stderr, "%s:%d: action key cannot be empty\n", path, lineno);
+        if (!strcasecmp(key, "channel")) {
+            int ch = atoi(val);
+            if (ch < 1 || ch > 16) {
+                fprintf(stderr, "%s:%d: channel must be 1-16\n", path, lineno);
                 free(dup);
                 return -1;
             }
-            if (!strcasecmp(val, "up")) {
-                tmp.key_code = ACTION_KEY_UP;
-            } else if (!strcasecmp(val, "down")) {
-                tmp.key_code = ACTION_KEY_DOWN;
-            } else if (!strcasecmp(val, "left")) {
-                tmp.key_code = ACTION_KEY_LEFT;
-            } else if (!strcasecmp(val, "right")) {
-                tmp.key_code = ACTION_KEY_RIGHT;
-            } else if (!strcasecmp(val, "enter") || !strcasecmp(val, "return")) {
-                tmp.key_code = ACTION_KEY_ENTER;
-            } else if (!strcasecmp(val, "space") || !strcasecmp(val, "spacebar")) {
-                tmp.key_code = ACTION_KEY_SPACE;
+            tmp.channel = ch - 1;
+        } else if (!strcasecmp(key, "edge")) {
+            if (!strcasecmp(val, "high")) {
+                tmp.edge = ACTION_EDGE_HIGH;
+            } else if (!strcasecmp(val, "low")) {
+                tmp.edge = ACTION_EDGE_LOW;
             } else {
-                tmp.key_code = ACTION_KEY_CHAR;
-                tmp.key_char = val[0];
+                fprintf(stderr, "%s:%d: edge must be high or low\n", path, lineno);
+                free(dup);
+                return -1;
+            }
+        } else if (!strcasecmp(key, "press")) {
+            if (!strcasecmp(val, "short")) {
+                tmp.press = ACTION_PRESS_SHORT;
+            } else if (!strcasecmp(val, "long")) {
+                tmp.press = ACTION_PRESS_LONG;
+            } else if (!strcasecmp(val, "any")) {
+                tmp.press = ACTION_PRESS_ANY;
+            } else {
+                fprintf(stderr, "%s:%d: press must be short, long, or any\n", path, lineno);
+                free(dup);
+                return -1;
             }
         } else if (!strcasecmp(key, "transport")) {
             if (!strcasecmp(val, "udp")) {
@@ -582,6 +589,10 @@ static int parse_action(const action_keys_config_t *cfg, const char *val, action
     }
     free(dup);
 
+    if (tmp.channel < 0 || tmp.channel >= 16) {
+        fprintf(stderr, "%s:%d: action missing valid channel\n", path, lineno);
+        return -1;
+    }
     if (tmp.destination[0] == '\0') {
         fprintf(stderr, "%s:%d: action missing destination\n", path, lineno);
         return -1;
@@ -631,8 +642,6 @@ int action_keys_config_load(action_keys_config_t *cfg, const char *path)
             }
         } else if (!strcasecmp(key, "verbose")) {
             cfg->verbose = atoi(val) ? 1 : 0;
-        } else if (!strcasecmp(key, "input_device")) {
-            snprintf(cfg->input_device, sizeof(cfg->input_device), "%s", val);
         } else if (!strncasecmp(key, "action_", 7)) {
             if (cfg->action_count >= ACTION_MAX) {
                 fprintf(stderr, "%s:%d: maximum of %d actions reached; ignoring\n",
@@ -650,97 +659,48 @@ int action_keys_config_load(action_keys_config_t *cfg, const char *path)
     return 0;
 }
 
-void action_keys_handle_keycode(action_keycode_t code, char ch,
-                                const action_keys_config_t *cfg,
-                                action_binding_t bindings[ACTION_MAX])
+void action_keys_handle_press(const action_keys_config_t *cfg,
+                              action_binding_t bindings[ACTION_MAX],
+                              int channel_index,
+                              action_edge_t edge,
+                              action_press_t press)
 {
-    if (cfg && cfg->verbose) {
-        const char *name = NULL;
-        char msg[32];
-        switch (code) {
-        case ACTION_KEY_UP: name = "key up"; break;
-        case ACTION_KEY_DOWN: name = "key down"; break;
-        case ACTION_KEY_LEFT: name = "key left"; break;
-        case ACTION_KEY_RIGHT: name = "key right"; break;
-        case ACTION_KEY_ENTER: name = "key enter"; break;
-        case ACTION_KEY_SPACE: name = "key space"; break;
-        default:
-            if (code == ACTION_KEY_CHAR) {
-                snprintf(msg, sizeof(msg), "key '%c'", ch ? ch : '?');
-                name = msg;
-            }
-            break;
-        }
-        if (name) {
-            maybe_log(cfg, NULL, name, 0);
-        }
-    }
     for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
         const action_spec_t *a = &cfg->actions[i];
-        if (a->key_code == ACTION_KEY_NONE) {
+        if (a->channel != channel_index) {
             continue;
         }
-        if (a->key_code == ACTION_KEY_CHAR && code == ACTION_KEY_CHAR && a->key_char == ch) {
-            int rc = dispatch(&bindings[i]);
-            maybe_log(cfg, a, "action", rc);
-        } else if (a->key_code == code && code != ACTION_KEY_CHAR) {
-            int rc = dispatch(&bindings[i]);
-            maybe_log(cfg, a, "action", rc);
+        if (a->edge != edge) {
+            continue;
         }
+        if (a->press != ACTION_PRESS_ANY && a->press != press) {
+            continue;
+        }
+        int rc = dispatch(&bindings[i]);
+        maybe_log(cfg, a, "action", rc);
     }
 }
 
-int action_keys_map_evdev_key(int code, action_keycode_t *out_code, char *out_char)
+void action_keys_build_watchlist(const action_keys_config_t *cfg,
+                                 int watch_high[16],
+                                 int watch_low[16])
 {
-    if (!out_code || !out_char) {
-        return -1;
+    if (!cfg) {
+        return;
     }
-    *out_code = ACTION_KEY_NONE;
-    *out_char = 0;
-    switch (code) {
-    case KEY_UP: *out_code = ACTION_KEY_UP; return 0;
-    case KEY_DOWN: *out_code = ACTION_KEY_DOWN; return 0;
-    case KEY_LEFT: *out_code = ACTION_KEY_LEFT; return 0;
-    case KEY_RIGHT: *out_code = ACTION_KEY_RIGHT; return 0;
-    case KEY_ENTER:
-    case KEY_KPENTER: *out_code = ACTION_KEY_ENTER; return 0;
-    case KEY_SPACE: *out_code = ACTION_KEY_SPACE; return 0;
-    case KEY_1: *out_code = ACTION_KEY_CHAR; *out_char = '1'; return 0;
-    case KEY_2: *out_code = ACTION_KEY_CHAR; *out_char = '2'; return 0;
-    case KEY_3: *out_code = ACTION_KEY_CHAR; *out_char = '3'; return 0;
-    case KEY_4: *out_code = ACTION_KEY_CHAR; *out_char = '4'; return 0;
-    case KEY_5: *out_code = ACTION_KEY_CHAR; *out_char = '5'; return 0;
-    case KEY_6: *out_code = ACTION_KEY_CHAR; *out_char = '6'; return 0;
-    case KEY_7: *out_code = ACTION_KEY_CHAR; *out_char = '7'; return 0;
-    case KEY_8: *out_code = ACTION_KEY_CHAR; *out_char = '8'; return 0;
-    case KEY_9: *out_code = ACTION_KEY_CHAR; *out_char = '9'; return 0;
-    case KEY_0: *out_code = ACTION_KEY_CHAR; *out_char = '0'; return 0;
-    case KEY_A: *out_code = ACTION_KEY_CHAR; *out_char = 'a'; return 0;
-    case KEY_B: *out_code = ACTION_KEY_CHAR; *out_char = 'b'; return 0;
-    case KEY_C: *out_code = ACTION_KEY_CHAR; *out_char = 'c'; return 0;
-    case KEY_D: *out_code = ACTION_KEY_CHAR; *out_char = 'd'; return 0;
-    case KEY_E: *out_code = ACTION_KEY_CHAR; *out_char = 'e'; return 0;
-    case KEY_F: *out_code = ACTION_KEY_CHAR; *out_char = 'f'; return 0;
-    case KEY_G: *out_code = ACTION_KEY_CHAR; *out_char = 'g'; return 0;
-    case KEY_H: *out_code = ACTION_KEY_CHAR; *out_char = 'h'; return 0;
-    case KEY_I: *out_code = ACTION_KEY_CHAR; *out_char = 'i'; return 0;
-    case KEY_J: *out_code = ACTION_KEY_CHAR; *out_char = 'j'; return 0;
-    case KEY_K: *out_code = ACTION_KEY_CHAR; *out_char = 'k'; return 0;
-    case KEY_L: *out_code = ACTION_KEY_CHAR; *out_char = 'l'; return 0;
-    case KEY_M: *out_code = ACTION_KEY_CHAR; *out_char = 'm'; return 0;
-    case KEY_N: *out_code = ACTION_KEY_CHAR; *out_char = 'n'; return 0;
-    case KEY_O: *out_code = ACTION_KEY_CHAR; *out_char = 'o'; return 0;
-    case KEY_P: *out_code = ACTION_KEY_CHAR; *out_char = 'p'; return 0;
-    case KEY_Q: *out_code = ACTION_KEY_CHAR; *out_char = 'q'; return 0;
-    case KEY_R: *out_code = ACTION_KEY_CHAR; *out_char = 'r'; return 0;
-    case KEY_S: *out_code = ACTION_KEY_CHAR; *out_char = 's'; return 0;
-    case KEY_T: *out_code = ACTION_KEY_CHAR; *out_char = 't'; return 0;
-    case KEY_U: *out_code = ACTION_KEY_CHAR; *out_char = 'u'; return 0;
-    case KEY_V: *out_code = ACTION_KEY_CHAR; *out_char = 'v'; return 0;
-    case KEY_W: *out_code = ACTION_KEY_CHAR; *out_char = 'w'; return 0;
-    case KEY_X: *out_code = ACTION_KEY_CHAR; *out_char = 'x'; return 0;
-    case KEY_Y: *out_code = ACTION_KEY_CHAR; *out_char = 'y'; return 0;
-    case KEY_Z: *out_code = ACTION_KEY_CHAR; *out_char = 'z'; return 0;
-    default: return -1;
+    for (int i = 0; i < 16; i++) {
+        watch_high[i] = 0;
+        watch_low[i] = 0;
+    }
+    for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
+        const action_spec_t *a = &cfg->actions[i];
+        if (a->channel < 0 || a->channel >= 16) {
+            continue;
+        }
+        if (a->edge == ACTION_EDGE_HIGH) {
+            watch_high[a->channel] = 1;
+        } else {
+            watch_low[a->channel] = 1;
+        }
     }
 }

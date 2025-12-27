@@ -23,19 +23,20 @@ typedef enum {
 } action_http_method_t;
 
 typedef enum {
-    ACTION_KEY_NONE = 0,
-    ACTION_KEY_CHAR,
-    ACTION_KEY_UP,
-    ACTION_KEY_DOWN,
-    ACTION_KEY_LEFT,
-    ACTION_KEY_RIGHT,
-    ACTION_KEY_ENTER,
-    ACTION_KEY_SPACE
-} action_keycode_t;
+    ACTION_EDGE_HIGH = 0,
+    ACTION_EDGE_LOW
+} action_edge_t;
+
+typedef enum {
+    ACTION_PRESS_ANY = 0,
+    ACTION_PRESS_SHORT,
+    ACTION_PRESS_LONG
+} action_press_t;
 
 typedef struct {
-    action_keycode_t key_code;
-    char key_char;
+    int channel; /* zero-based channel index */
+    action_edge_t edge;
+    action_press_t press;
     action_transport_t transport;
     action_http_method_t method;
     char destination[ACTION_MAX_DEST_LEN];
@@ -56,7 +57,6 @@ typedef struct {
 typedef struct {
     int http_timeout_ms;
     int verbose;
-    char input_device[256];
     size_t action_count;
     action_spec_t actions[ACTION_MAX];
 } action_keys_config_t;
@@ -64,14 +64,18 @@ typedef struct {
 void action_keys_config_defaults(action_keys_config_t *cfg);
 int action_keys_config_load(action_keys_config_t *cfg, const char *path);
 
-int action_keys_map_evdev_key(int code, action_keycode_t *out_code, char *out_char);
-
 void action_keys_bindings_init(const action_keys_config_t *cfg,
                                action_binding_t bindings[ACTION_MAX]);
 void action_keys_free_bindings(action_binding_t bindings[ACTION_MAX]);
 
-void action_keys_handle_keycode(action_keycode_t code, char ch,
-                                const action_keys_config_t *cfg,
-                                action_binding_t bindings[ACTION_MAX]);
+void action_keys_handle_press(const action_keys_config_t *cfg,
+                              action_binding_t bindings[ACTION_MAX],
+                              int channel_index,
+                              action_edge_t edge,
+                              action_press_t press);
+
+void action_keys_build_watchlist(const action_keys_config_t *cfg,
+                                 int watch_high[16],
+                                 int watch_low[16]);
 
 #endif

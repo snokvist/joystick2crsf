@@ -94,22 +94,20 @@ to avoid chattering while the stick settles.
 ## Action keys configuration
 
 `joystick2crsf` reads `/etc/action_keys.conf` when it is readable and fires UDP or HTTP actions
-whenever channel-based key bindings trigger. You can keep actions in that separate file while the
-runtime drives them directly, avoiding the extra input-polling helper.
+whenever channel thresholds trip. Actions are bound to channels, edge (high/low), and press type
+(short/long) while reusing the same hysteresis and timing as the built-in key-trigger logic.
 
 Key features:
 
-- Bind actions to logical keys (`key=...`) referenced by `key_short_N`/`key_long_N` (and `_low`
-  variants). Names `up`, `down`, `left`, `right`, `enter`/`return`, `space`/`spacebar`, `a`–`z`,
-  and `0`–`9` are supported.
+- Bind actions to channels with `channel`, `edge=high|low`, and `press=short|long|any`.
 - Transports: `udp` (send payload verbatim) or `http` (`GET`/`POST` with optional headers).
 - Config fields: `destination`/`url`, `body`, `header`, and `timeout_ms`.
 
 Example config (`/etc/action_keys.conf`):
 
 ```
-action_1=key=a,transport=udp,url=udp://10.0.0.2:9000,body={"ping":1}
-action_2=key=b,transport=http,url=http://10.0.0.2/api,method=POST,body={"cmd":"start"}
+action_1=channel=5,edge=high,press=short,transport=udp,url=udp://10.0.0.2:9000,body={"ping":1}
+action_2=channel=6,edge=low,press=long,transport=http,url=http://10.0.0.2/api,method=POST,body={"cmd":"start"}
 ```
 
 The dispatch runs even when `/dev/uinput` is unavailable, so remove or rename the config file if you

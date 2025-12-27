@@ -23,7 +23,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/uinput.h>
 #include <netdb.h>
 #include <sched.h>
 #include <signal.h>
@@ -118,17 +117,14 @@ typedef struct {
     int rescan_interval;        /* seconds */
     int startup_delay;          /* seconds */
     int use_gamecontroller;
-    int key_short[16];
-    int key_long[16];
-    int key_short_low[16];
-    int key_long_low[16];
     int key_long_threshold_ms;
-    int key_debug;
 } config_t;
 
 typedef struct {
     action_keys_config_t cfg;
     action_binding_t bindings[ACTION_MAX];
+    int watch_high[16];
+    int watch_low[16];
     int enabled;
 } action_keys_runtime_t;
 
@@ -893,114 +889,6 @@ static void parse_dead_list(const char *str, int out[16])
     free(dup);
 }
 
-static const uint16_t keycode_letters[26] = {
-    KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J,
-    KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
-    KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
-};
-
-typedef struct {
-    const char *name;
-    uint16_t code;
-} key_lookup_t;
-
-static const key_lookup_t keycode_named_keys[] = {
-    {"up", KEY_UP},
-    {"down", KEY_DOWN},
-    {"left", KEY_LEFT},
-    {"right", KEY_RIGHT},
-    {"enter", KEY_ENTER},
-    {"return", KEY_ENTER},
-    {"space", KEY_SPACE},
-    {"spacebar", KEY_SPACE},
-};
-
-static int keycode_from_name(const char *name)
-{
-    if (!name || !*name) {
-        return -1;
-    }
-
-    if (strlen(name) == 1) {
-        unsigned char ch = (unsigned char)name[0];
-        if (isalpha(ch)) {
-            char lower = (char)tolower(ch);
-            return keycode_letters[lower - 'a'];
-        }
-        switch (ch) {
-        case '0': return KEY_0;
-        case '1': return KEY_1;
-        case '2': return KEY_2;
-        case '3': return KEY_3;
-        case '4': return KEY_4;
-        case '5': return KEY_5;
-        case '6': return KEY_6;
-        case '7': return KEY_7;
-        case '8': return KEY_8;
-        case '9': return KEY_9;
-        default: break;
-        }
-    }
-
-    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
-        if (!strcasecmp(name, keycode_named_keys[i].name)) {
-            return keycode_named_keys[i].code;
-        }
-    }
-
-    return -1;
-}
-
-static const char *keycode_name(int code)
-{
-    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
-        if (code == (int)keycode_named_keys[i].code) {
-            return keycode_named_keys[i].name;
-        }
-    }
-    for (size_t i = 0; i < sizeof(keycode_letters) / sizeof(keycode_letters[0]); i++) {
-        if (code == (int)keycode_letters[i]) {
-            static const char *letters[] = {
-                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
-                "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
-                "u", "v", "w", "x", "y", "z"
-            };
-            return letters[i];
-        }
-    }
-    if (code >= KEY_1 && code <= KEY_9) {
-        static char buf[2];
-        buf[0] = (char)('1' + (code - KEY_1));
-        buf[1] = '\0';
-        return buf;
-    }
-    if (code == KEY_0) {
-        return "0";
-    }
-    return "unknown";
-}
-
-static void parse_key_binding(const char *val, int *dst, const char *path, int lineno)
-{
-    char *copy = strdup(val);
-    if (!copy) {
-        fprintf(stderr, "%s:%d: failed to parse key binding (out of memory)\n", path, lineno);
-        return;
-    }
-
-    trim(copy);
-    int code = keycode_from_name(copy);
-    if (code < 0) {
-        fprintf(stderr,
-                "%s:%d: unsupported key '%s' (use up,down,left,right,enter,a-z,0-9,space)\n",
-                path, lineno, copy);
-        free(copy);
-        return;
-    }
-    *dst = code;
-    free(copy);
-}
-
 static int rate_supported(int rate)
 {
     switch (rate) {
@@ -1037,15 +925,10 @@ static void config_defaults(config_t *cfg)
     cfg->startup_delay = 5;
     cfg->use_gamecontroller = 1;
     cfg->key_long_threshold_ms = KEY_LONG_DEFAULT_MS;
-    cfg->key_debug = 0;
     for (int i = 0; i < 16; i++) {
         cfg->map[i] = i;
         cfg->invert[i] = 0;
         cfg->dead[i] = 0;
-        cfg->key_short[i] = -1;
-        cfg->key_long[i] = -1;
-        cfg->key_short_low[i] = -1;
-        cfg->key_long_low[i] = -1;
     }
 }
 
@@ -1056,6 +939,8 @@ static int config_load(config_t *cfg, const char *path)
         fprintf(stderr, "Failed to open config %s: %s\n", path, strerror(errno));
         return -1;
     }
+
+    static int warned_key_bindings = 0;
 
     char line[MAX_LINE_LEN];
     int lineno = 0;
@@ -1152,38 +1037,13 @@ static int config_load(config_t *cfg, const char *path)
             }
         } else if (!strcasecmp(key, "key_long_threshold_ms")) {
             cfg->key_long_threshold_ms = atoi(val);
-        } else if (!strcasecmp(key, "key_debug")) {
-            int b;
-            if (parse_bool_value(val, &b) == 0) {
-                cfg->key_debug = b;
-            }
-        } else if (!strncasecmp(key, "key_short_low_", 14)) {
-            int ch = atoi(key + 14);
-            if (ch >= 1 && ch <= 16) {
-                parse_key_binding(val, &cfg->key_short_low[ch - 1], path, lineno);
-            } else {
-                fprintf(stderr, "%s:%d: key_short_low_N expects 1-16\n", path, lineno);
-            }
-        } else if (!strncasecmp(key, "key_short_", 10)) {
-            int ch = atoi(key + 10);
-            if (ch >= 1 && ch <= 16) {
-                parse_key_binding(val, &cfg->key_short[ch - 1], path, lineno);
-            } else {
-                fprintf(stderr, "%s:%d: key_short_N expects 1-16\n", path, lineno);
-            }
-        } else if (!strncasecmp(key, "key_long_low_", 13)) {
-            int ch = atoi(key + 13);
-            if (ch >= 1 && ch <= 16) {
-                parse_key_binding(val, &cfg->key_long_low[ch - 1], path, lineno);
-            } else {
-                fprintf(stderr, "%s:%d: key_long_low_N expects 1-16\n", path, lineno);
-            }
-        } else if (!strncasecmp(key, "key_long_", 9)) {
-            int ch = atoi(key + 9);
-            if (ch >= 1 && ch <= 16) {
-                parse_key_binding(val, &cfg->key_long[ch - 1], path, lineno);
-            } else {
-                fprintf(stderr, "%s:%d: key_long_N expects 1-16\n", path, lineno);
+        } else if (!strncasecmp(key, "key_short", 9) ||
+                   !strncasecmp(key, "key_long", 8) ||
+                   !strcasecmp(key, "key_debug")) {
+            if (!warned_key_bindings) {
+                fprintf(stderr, "Deprecated key_* bindings are ignored; use action_keys.conf "
+                        "channel actions instead.\n");
+                warned_key_bindings = 1;
             }
         } else {
             fprintf(stderr, "%s:%d: unknown key '%s'\n", path, lineno, key);
@@ -1241,125 +1101,6 @@ static int config_load(config_t *cfg, const char *path)
         cfg->key_long_threshold_ms = KEY_LONG_DEFAULT_MS;
     }
     return 0;
-}
-
-/* --------------------------- Uinput helpers -------------------------------- */
-static int uinput_emit_event(int fd, uint16_t type, uint16_t code, int32_t value)
-{
-    struct input_event ev;
-    memset(&ev, 0, sizeof(ev));
-    gettimeofday(&ev.time, NULL);
-    ev.type = type;
-    ev.code = code;
-    ev.value = value;
-    return (int)write(fd, &ev, sizeof(ev));
-}
-
-static void uinput_send_key(int fd, uint16_t code)
-{
-    if (fd < 0) {
-        return;
-    }
-    uinput_emit_event(fd, EV_KEY, code, 1);
-    uinput_emit_event(fd, EV_SYN, SYN_REPORT, 0);
-    uinput_emit_event(fd, EV_KEY, code, 0);
-    uinput_emit_event(fd, EV_SYN, SYN_REPORT, 0);
-}
-
-static int uinput_open_keyboard(void)
-{
-    static const uint16_t supported_keys[] = {
-        KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_SPACE,
-        KEY_0, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9,
-        KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J,
-        KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
-        KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
-    };
-    const size_t supported_count = sizeof(supported_keys) / sizeof(supported_keys[0]);
-
-    int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
-    if (fd < 0) {
-        perror("uinput open");
-        return -1;
-    }
-
-    if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0) {
-        perror("uinput EV_KEY");
-        close(fd);
-        return -1;
-    }
-    for (size_t i = 0; i < supported_count; i++) {
-        if (ioctl(fd, UI_SET_KEYBIT, supported_keys[i]) < 0) {
-            perror("uinput KEYBIT");
-            close(fd);
-            return -1;
-        }
-    }
-
-    for (size_t i = 0; i < sizeof(keycode_named_keys) / sizeof(keycode_named_keys[0]); i++) {
-        int found = 0;
-        for (size_t j = 0; j < supported_count; j++) {
-            if (keycode_named_keys[i].code == supported_keys[j]) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            fprintf(stderr, "uinput: missing support for key '%s' (code %u)\n",
-                    keycode_named_keys[i].name,
-                    (unsigned)keycode_named_keys[i].code);
-            close(fd);
-            return -1;
-        }
-    }
-
-#ifdef UI_SET_EVBIT
-    if (ioctl(fd, UI_SET_EVBIT, EV_SYN) < 0) {
-        perror("uinput EV_SYN");
-        close(fd);
-        return -1;
-    }
-#endif
-
-#ifdef UI_DEV_SETUP
-    struct uinput_setup usetup;
-    memset(&usetup, 0, sizeof(usetup));
-    snprintf(usetup.name, UINPUT_MAX_NAME_SIZE, "joystick2crsf-keys");
-    usetup.id.bustype = BUS_USB;
-    usetup.id.vendor = 0x1d50;
-    usetup.id.product = 0x615e;
-    usetup.id.version = 1;
-    if (ioctl(fd, UI_DEV_SETUP, &usetup) < 0) {
-        perror("uinput setup");
-        close(fd);
-        return -1;
-    }
-    if (ioctl(fd, UI_DEV_CREATE) < 0) {
-        perror("uinput create");
-        close(fd);
-        return -1;
-    }
-#else
-    struct uinput_user_dev udev;
-    memset(&udev, 0, sizeof(udev));
-    snprintf(udev.name, UINPUT_MAX_NAME_SIZE, "joystick2crsf-keys");
-    udev.id.bustype = BUS_USB;
-    udev.id.vendor = 0x1d50;
-    udev.id.product = 0x615e;
-    udev.id.version = 1;
-    if (write(fd, &udev, sizeof(udev)) < 0) {
-        perror("uinput write");
-        close(fd);
-        return -1;
-    }
-    if (ioctl(fd, UI_DEV_CREATE) < 0) {
-        perror("uinput create");
-        close(fd);
-        return -1;
-    }
-#endif
-
-    return fd;
 }
 
 /* --------------------------- Time helpers ---------------------------------- */
@@ -1430,6 +1171,10 @@ static void action_keys_runtime_init(action_keys_runtime_t *ak)
     for (size_t i = 0; i < ACTION_MAX; i++) {
         ak->bindings[i].udp_fd = -1;
     }
+    for (int i = 0; i < 16; i++) {
+        ak->watch_high[i] = 0;
+        ak->watch_low[i] = 0;
+    }
 }
 
 static void action_keys_runtime_reload(action_keys_runtime_t *ak,
@@ -1458,24 +1203,14 @@ static void action_keys_runtime_reload(action_keys_runtime_t *ak,
     action_keys_config_defaults(&ak->cfg);
     if (action_keys_config_load(&ak->cfg, path) == 0 && ak->cfg.action_count > 0) {
         action_keys_bindings_init(&ak->cfg, ak->bindings);
+        action_keys_build_watchlist(&ak->cfg, ak->watch_high, ak->watch_low);
         ak->enabled = 1;
         if (ak->cfg.verbose) {
             fprintf(stderr, "Action keys ready (%zu bindings)\n", ak->cfg.action_count);
         }
     } else {
         ak->enabled = 0;
-    }
-}
-
-static void action_keys_dispatch_evdev(action_keys_runtime_t *ak, uint16_t key_code)
-{
-    if (!ak || !ak->enabled) {
-        return;
-    }
-    action_keycode_t code;
-    char ch;
-    if (action_keys_map_evdev_key((int)key_code, &code, &ch) == 0) {
-        action_keys_handle_keycode(code, ch, &ak->cfg, ak->bindings);
+        action_keys_build_watchlist(&ak->cfg, ak->watch_high, ak->watch_low);
     }
 }
 
@@ -1543,26 +1278,6 @@ int main(int argc, char **argv)
             struct timespec delay = { .tv_sec = cfg.startup_delay, .tv_nsec = 0 };
             nanosleep(&delay, NULL);
             startup_delay_applied = 1;
-        }
-
-        int key_fd = -1;
-        int key_fd_available = 0;
-        int key_bindings_present = 0;
-        for (int i = 0; i < 16; i++) {
-            if (cfg.key_short[i] >= 0 || cfg.key_long[i] >= 0 ||
-                cfg.key_short_low[i] >= 0 || cfg.key_long_low[i] >= 0) {
-                key_bindings_present = 1;
-                break;
-            }
-        }
-        if (key_bindings_present) {
-            key_fd = uinput_open_keyboard();
-            if (key_fd < 0) {
-                fprintf(stderr, "Keyboard bindings requested but /dev/uinput is unavailable; "
-                        "skipping virtual key output.\n");
-            } else {
-                key_fd_available = 1;
-            }
         }
 
         int udp_fd = -1;
@@ -1963,9 +1678,9 @@ int main(int argc, char **argv)
                 }
             }
 
-            if (key_bindings_present) {
+            if (action_keys.enabled) {
                 for (int i = 0; i < 16; i++) {
-                    if (cfg.key_short[i] >= 0 || cfg.key_long[i] >= 0) {
+                    if (action_keys.watch_high[i]) {
                         int pressed = ch_out[i] >= KEY_TRIGGER_HIGH;
                         if (pressed) {
                             if (!key_press_active[i]) {
@@ -1974,30 +1689,14 @@ int main(int argc, char **argv)
                             }
                         } else if (key_press_active[i] && ch_out[i] <= KEY_TRIGGER_LOW) {
                             int64_t held = timespec_diff_ms(&key_press_start[i], &now);
-                            int code = -1;
-                            if (cfg.key_long[i] >= 0 && held >= cfg.key_long_threshold_ms) {
-                                code = cfg.key_long[i];
-                            } else if (cfg.key_short[i] >= 0) {
-                                code = cfg.key_short[i];
-                            } else if (cfg.key_long[i] >= 0) {
-                                code = cfg.key_long[i];
-                            }
-                            if (code >= 0) {
-                                if (key_fd_available) {
-                                    uinput_send_key(key_fd, (uint16_t)code);
-                                }
-                                action_keys_dispatch_evdev(&action_keys, (uint16_t)code);
-                                if (cfg.key_debug) {
-                                    const char *kind = (held >= cfg.key_long_threshold_ms) ? "long" : "short";
-                                    fprintf(stderr, "CH%d %s press (%lld ms) -> key %s\n",
-                                            i + 1, kind, (long long)held, keycode_name(code));
-                                }
-                            }
+                            action_press_t press = (held >= cfg.key_long_threshold_ms) ?
+                                ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
+                            action_keys_handle_press(&action_keys.cfg, action_keys.bindings,
+                                                     i, ACTION_EDGE_HIGH, press);
                             key_press_active[i] = 0;
                         }
                     }
-
-                    if (cfg.key_short_low[i] >= 0 || cfg.key_long_low[i] >= 0) {
+                    if (action_keys.watch_low[i]) {
                         int pressed_low = ch_out[i] <= KEY_TRIGGER_NEG_HIGH;
                         if (pressed_low) {
                             if (!key_press_low_active[i]) {
@@ -2006,25 +1705,10 @@ int main(int argc, char **argv)
                             }
                         } else if (key_press_low_active[i] && ch_out[i] >= KEY_TRIGGER_NEG_LOW) {
                             int64_t held = timespec_diff_ms(&key_press_low_start[i], &now);
-                            int code = -1;
-                            if (cfg.key_long_low[i] >= 0 && held >= cfg.key_long_threshold_ms) {
-                                code = cfg.key_long_low[i];
-                            } else if (cfg.key_short_low[i] >= 0) {
-                                code = cfg.key_short_low[i];
-                            } else if (cfg.key_long_low[i] >= 0) {
-                                code = cfg.key_long_low[i];
-                            }
-                            if (code >= 0) {
-                                if (key_fd_available) {
-                                    uinput_send_key(key_fd, (uint16_t)code);
-                                }
-                                action_keys_dispatch_evdev(&action_keys, (uint16_t)code);
-                                if (cfg.key_debug) {
-                                    const char *kind = (held >= cfg.key_long_threshold_ms) ? "long" : "short";
-                                    fprintf(stderr, "CH%d low %s press (%lld ms) -> key %s\n",
-                                            i + 1, kind, (long long)held, keycode_name(code));
-                                }
-                            }
+                            action_press_t press = (held >= cfg.key_long_threshold_ms) ?
+                                ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
+                            action_keys_handle_press(&action_keys.cfg, action_keys.bindings,
+                                                     i, ACTION_EDGE_LOW, press);
                             key_press_low_active[i] = 0;
                         }
                     }
@@ -2165,11 +1849,6 @@ int main(int argc, char **argv)
         if (sse_fd >= 0) {
             close(sse_fd);
             sse_fd = -1;
-        }
-        if (key_fd >= 0) {
-            ioctl(key_fd, UI_DEV_DESTROY);
-            close(key_fd);
-            key_fd = -1;
         }
         action_keys_free_bindings(action_keys.bindings);
 
