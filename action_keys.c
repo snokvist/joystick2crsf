@@ -431,8 +431,8 @@ static void maybe_log(const config_t *cfg, const action_t *spec, const char *eve
 static void config_defaults(config_t *cfg)
 {
     cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
-    cfg->verbose = 0;
-    memset(cfg->input_device, 0, sizeof(cfg->input_device));
+    cfg->verbose = 1;
+    snprintf(cfg->input_device, sizeof(cfg->input_device), "%s", "/dev/input/joystick2crsf-keys");
     cfg->action_count = 0;
     memset(cfg->actions, 0, sizeof(cfg->actions));
     for (size_t i = 0; i < ACTION_MAX; i++) {
