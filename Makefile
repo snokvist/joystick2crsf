@@ -1,9 +1,6 @@
 TARGET ?= joystick2crsf
-TARGET_KEYS ?= action_keys
-SRCS := joystick2crsf.c
-SRCS_KEYS := action_keys.c
+SRCS := joystick2crsf.c action_keys.c
 OBJS := $(SRCS:.c=.o)
-OBJS_KEYS := $(SRCS_KEYS:.c=.o)
 
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -23,31 +20,22 @@ CURL_LIBS ?=
 CFLAGS ?= -O2 -g -Wall -Wextra
 LDFLAGS ?=
 LIBS := $(SDL2_LIBS)
-LIBS_KEYS :=
 
 INSTALL ?= install
 DESTDIR ?=
 
-all: $(TARGET) $(TARGET_KEYS)
+all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-$(TARGET_KEYS): $(OBJS_KEYS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS_KEYS)
-
 %.o: %.c
 	$(CC) $(CFLAGS) $(SDL2_CFLAGS) -c -o $@ $<
 
-action_keys.o: action_keys.c
-	$(CC) $(CFLAGS) $(CURL_CFLAGS) -c -o $@ $<
-
-install: $(TARGET) $(TARGET_KEYS)
+install: $(TARGET)
 	$(INSTALL) -D -m 0755 $(TARGET) $(DESTDIR)$(JOYSTICK2CRSF_BIN)
 	$(INSTALL) -D -m 0644 joystick2crsf.conf \
 		$(DESTDIR)$(JOYSTICK2CRSF_CONF)
-	$(INSTALL) -D -m 0755 $(TARGET_KEYS) \
-		$(DESTDIR)$(BINDIR)/$(TARGET_KEYS)
 	$(INSTALL) -D -m 0755 S96joystick2crsf \
 		$(DESTDIR)$(INITDDIR)/S96joystick2crsf
 	$(INSTALL) -D -m 0644 joystick2crsf.service \
@@ -58,6 +46,6 @@ install: $(TARGET) $(TARGET_KEYS)
 		$(DESTDIR)$(SYSTEMD_UNITDIR)/joystick2crsf.service
 
 clean:
-	rm -f $(TARGET) $(TARGET_KEYS) $(OBJS) $(OBJS_KEYS)
+	rm -f $(TARGET) $(OBJS)
 
 .PHONY: all install clean
