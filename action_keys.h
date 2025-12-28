@@ -7,7 +7,7 @@
 #include <pthread.h>
 
 #define ACTION_MAX                     32
-#define ACTION_DEBOUNCE_MS             500
+#define ACTION_DEBOUNCE_MS_DEFAULT     500
 #define ACTION_MAX_BODY_LEN            512
 #define ACTION_MAX_HEADER_LEN          128
 #define ACTION_MAX_HEADERS             8
@@ -80,6 +80,7 @@ typedef struct {
 
 typedef struct {
     int http_timeout_ms;
+    int debounce_ms;
     int verbose;
     size_t action_count;
     action_spec_t actions[ACTION_MAX];

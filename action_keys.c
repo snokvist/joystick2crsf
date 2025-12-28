@@ -519,6 +519,7 @@ static void enqueue_action(action_worker_t *worker, int index, const action_spec
 void action_keys_config_defaults(action_keys_config_t *cfg)
 {
     cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
+    cfg->debounce_ms = ACTION_DEBOUNCE_MS_DEFAULT;
     cfg->verbose = 1;
     cfg->action_count = 0;
     memset(cfg->actions, 0, sizeof(cfg->actions));
@@ -729,6 +730,11 @@ int action_keys_config_load(action_keys_config_t *cfg, const char *path)
             if (cfg->http_timeout_ms <= 0) {
                 cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
             }
+        } else if (!strcasecmp(key, "action_debounce_ms")) {
+            cfg->debounce_ms = atoi(val);
+            if (cfg->debounce_ms < 0) {
+                cfg->debounce_ms = 0;
+            }
         } else if (!strcasecmp(key, "verbose")) {
             cfg->verbose = atoi(val) ? 1 : 0;
         } else if (!strncasecmp(key, "action_", 7)) {
@@ -780,7 +786,7 @@ void action_keys_handle_press(const action_keys_config_t *cfg,
         }
 
         int64_t diff = timespec_diff_ms_local(&state->last_dispatch, now);
-        if (diff >= ACTION_DEBOUNCE_MS) {
+        if (diff >= cfg->debounce_ms) {
             enqueue_action(worker, (int)i, a);
             maybe_log(cfg, a, "action (queued)", 0);
             state->last_dispatch = *now;
@@ -808,7 +814,7 @@ void action_keys_process_pending(const action_keys_config_t *cfg,
     }
 
     int64_t diff = timespec_diff_ms_local(&state->last_dispatch, now);
-    if (diff >= ACTION_DEBOUNCE_MS) {
+    if (diff >= cfg->debounce_ms) {
         enqueue_action(worker, state->pending_idx, &cfg->actions[state->pending_idx]);
         maybe_log(cfg, &cfg->actions[state->pending_idx], "action (queued from pending)", 0);
         state->last_dispatch = *now;
