@@ -594,6 +594,14 @@ static int sse_send_frame(int fd, const uint16_t ch[16], const int32_t raw[16])
     return 0;
 }
 
+static void try_rt(int prio)
+{
+    struct sched_param sp = { .sched_priority = prio };
+    if (!sched_setscheduler(0, SCHED_FIFO, &sp)) {
+        fprintf(stderr, "◎ SCHED_FIFO %d\n", prio);
+    }
+}
+
 static inline uint16_t scale_axis(int32_t v)
 {
     if (v <= -32768) {
@@ -1246,6 +1254,8 @@ int main(int argc, char **argv)
     int exit_code = 0;
     int startup_delay_applied = 0;
     int action_keys_warned_missing = 0;
+
+    try_rt(10);
 
     while (g_run) {
         config_t cfg;
