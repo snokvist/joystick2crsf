@@ -400,10 +400,15 @@ static void *action_worker_thread(void *arg)
 {
     action_worker_t *w = (action_worker_t *)arg;
 
-    /* Set worker to normal scheduling priority to avoid starving real-time loop */
+    /* Set worker to RT priority but lower than main loop (50) to avoid starvation
+       while remaining responsive enough to clear the queue */
     struct sched_param param;
-    param.sched_priority = 0;
-    pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+    param.sched_priority = 20;
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
+        /* Fallback to normal priority if RT is not available */
+        param.sched_priority = 0;
+        pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+    }
 
     while (1) {
         action_queue_item_t item;
@@ -444,7 +449,13 @@ void action_keys_worker_init(action_worker_t *worker)
 {
     if (!worker) return;
     memset(worker, 0, sizeof(*worker));
-    pthread_mutex_init(&worker->mutex, NULL);
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT);
+    pthread_mutex_init(&worker->mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+
     pthread_cond_init(&worker->cond, NULL);
     worker->running = 1;
     for (int i = 0; i < ACTION_MAX; i++) {
@@ -769,8 +780,10 @@ void action_keys_handle_press(const action_keys_config_t *cfg,
             state->last_dispatch = *now;
             state->pending_idx = -1;
         } else {
+            if (state->pending_idx != (int)i) {
+                maybe_log(cfg, a, "action (pending)", 0);
+            }
             state->pending_idx = (int)i;
-            maybe_log(cfg, a, "action (pending)", 0);
         }
     }
 }
