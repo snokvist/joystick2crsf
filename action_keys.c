@@ -20,6 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -146,69 +147,32 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
     return fd;
 }
 
-static void free_binding(action_binding_t *b)
+static int init_udp(action_worker_t *worker, int index, const char *destination)
 {
-    if (!b) {
-        return;
-    }
-    if (b->udp_fd >= 0) {
-        close(b->udp_fd);
-    }
-    memset(b, 0, sizeof(*b));
-    b->udp_fd = -1;
-}
-
-void action_keys_bindings_init(const action_keys_config_t *cfg,
-                               action_binding_t bindings[ACTION_MAX])
-{
-    if (!cfg || !bindings) {
-        return;
-    }
-    for (size_t i = 0; i < ACTION_MAX; i++) {
-        memset(&bindings[i], 0, sizeof(action_binding_t));
-        bindings[i].udp_fd = -1;
-    }
-    for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
-        bindings[i].spec = cfg->actions[i];
-    }
-}
-
-void action_keys_free_bindings(action_binding_t bindings[ACTION_MAX])
-{
-    if (!bindings) {
-        return;
-    }
-    for (size_t i = 0; i < ACTION_MAX; i++) {
-        free_binding(&bindings[i]);
-    }
-}
-
-static int init_udp(action_binding_t *b)
-{
-    if (!b) {
+    if (!worker || index < 0 || index >= ACTION_MAX) {
         return -1;
     }
-    if (b->udp_fd >= 0) {
+    if (worker->sockets[index] >= 0) {
         return 0;
     }
-    const char *dest = b->spec.destination;
+    const char *dest = destination;
     if (!strncasecmp(dest, "udp://", 6)) {
         dest += 6;
     }
-    b->udp_fd = open_udp_target(dest, &b->udp_addr, &b->udp_addrlen);
-    return b->udp_fd >= 0 ? 0 : -1;
+    worker->sockets[index] = open_udp_target(dest, &worker->socket_addrs[index], &worker->socket_addr_lens[index]);
+    return worker->sockets[index] >= 0 ? 0 : -1;
 }
 
-static int send_udp(action_binding_t *b)
+static int send_udp(action_worker_t *worker, int index, const action_spec_t *spec)
 {
-    if (!b) {
+    if (!worker || !spec) {
         return -1;
     }
-    if (init_udp(b) < 0) {
+    if (init_udp(worker, index, spec->destination) < 0) {
         return -1;
     }
-    ssize_t n = sendto(b->udp_fd, b->spec.body, b->spec.body_len, MSG_NOSIGNAL,
-                       (struct sockaddr *)&b->udp_addr, b->udp_addrlen);
+    ssize_t n = sendto(worker->sockets[index], spec->body, spec->body_len, MSG_NOSIGNAL,
+                       (struct sockaddr *)&worker->socket_addrs[index], worker->socket_addr_lens[index]);
     return (n < 0) ? -1 : 0;
 }
 
@@ -284,15 +248,15 @@ static int parse_http_url(const char *url, char **host_out, char **port_out, cha
     return 0;
 }
 
-static int send_http(action_binding_t *b)
+static int send_http(const action_spec_t *spec)
 {
-    if (!b) {
+    if (!spec) {
         return -1;
     }
     char *host = NULL;
     char *port = NULL;
     char *path = NULL;
-    if (parse_http_url(b->spec.destination, &host, &port, &path) < 0) {
+    if (parse_http_url(spec->destination, &host, &port, &path) < 0) {
         return -1;
     }
 
@@ -319,8 +283,8 @@ static int send_http(action_binding_t *b)
             continue;
         }
         struct timeval tv;
-        tv.tv_sec = b->spec.timeout_ms / 1000;
-        tv.tv_usec = (b->spec.timeout_ms % 1000) * 1000;
+        tv.tv_sec = spec->timeout_ms / 1000;
+        tv.tv_usec = (spec->timeout_ms % 1000) * 1000;
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
@@ -338,7 +302,7 @@ static int send_http(action_binding_t *b)
     }
 
     char req[2048];
-    const char *method = (b->spec.method == ACTION_HTTP_POST) ? "POST" : "GET";
+    const char *method = (spec->method == ACTION_HTTP_POST) ? "POST" : "GET";
     int written = snprintf(req, sizeof(req),
                            "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: action_keys\r\n",
                            method, path, host);
@@ -350,8 +314,8 @@ static int send_http(action_binding_t *b)
         return -1;
     }
     size_t off = (size_t)written;
-    for (size_t i = 0; i < b->spec.header_count && off < sizeof(req); i++) {
-        int n = snprintf(req + off, sizeof(req) - off, "%s\r\n", b->spec.headers[i]);
+    for (size_t i = 0; i < spec->header_count && off < sizeof(req); i++) {
+        int n = snprintf(req + off, sizeof(req) - off, "%s\r\n", spec->headers[i]);
         if (n < 0 || (size_t)n >= sizeof(req) - off) {
             close(fd);
             free(host);
@@ -361,10 +325,10 @@ static int send_http(action_binding_t *b)
         }
         off += (size_t)n;
     }
-    if (b->spec.method == ACTION_HTTP_POST) {
+    if (spec->method == ACTION_HTTP_POST) {
         int n = snprintf(req + off, sizeof(req) - off,
                          "Content-Length: %zu\r\nContent-Type: application/json\r\n",
-                         b->spec.body_len);
+                         spec->body_len);
         if (n < 0 || (size_t)n >= sizeof(req) - off) {
             close(fd);
             free(host);
@@ -392,8 +356,8 @@ static int send_http(action_binding_t *b)
         free(path);
         return -1;
     }
-    if (b->spec.method == ACTION_HTTP_POST && b->spec.body_len > 0) {
-        ssize_t nb = send(fd, b->spec.body, b->spec.body_len, MSG_NOSIGNAL);
+    if (spec->method == ACTION_HTTP_POST && spec->body_len > 0) {
+        ssize_t nb = send(fd, spec->body, spec->body_len, MSG_NOSIGNAL);
         if (nb < 0) {
             close(fd);
             free(host);
@@ -413,29 +377,6 @@ static int send_http(action_binding_t *b)
     return 0;
 }
 
-static int dispatch(action_binding_t *b)
-{
-    if (!b) {
-        return -1;
-    }
-    if (b->spec.transport == ACTION_TRANSPORT_UDP) {
-        return send_udp(b);
-    }
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        /* Child process */
-        int rc = send_http(b);
-        _exit(rc);
-    } else if (pid > 0) {
-        /* Parent process */
-        return 0;
-    }
-
-    perror("fork");
-    return -1;
-}
-
 static void maybe_log(const action_keys_config_t *cfg,
                       const action_spec_t *spec,
                       const char *event,
@@ -453,9 +394,132 @@ static void maybe_log(const action_keys_config_t *cfg,
     }
 }
 
+/* Worker Thread Implementation */
+
+static void *action_worker_thread(void *arg)
+{
+    action_worker_t *w = (action_worker_t *)arg;
+
+    /* Set worker priority. If <= 0, use SCHED_OTHER (non-RT).
+       Otherwise try SCHED_FIFO with the requested priority. */
+    struct sched_param param;
+    if (w->priority > 0) {
+        param.sched_priority = w->priority;
+        if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
+            /* Fallback to normal if RT fails */
+            param.sched_priority = 0;
+            pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+        }
+    } else {
+        param.sched_priority = 0;
+        pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+    }
+
+    while (1) {
+        action_queue_item_t item;
+        int has_item = 0;
+
+        pthread_mutex_lock(&w->mutex);
+        while (w->running && w->head == w->tail) {
+            pthread_cond_wait(&w->cond, &w->mutex);
+        }
+        if (!w->running) {
+            pthread_mutex_unlock(&w->mutex);
+            break;
+        }
+
+        item = w->queue[w->head];
+        w->head = (w->head + 1) % ACTION_QUEUE_SIZE;
+        has_item = 1;
+        pthread_mutex_unlock(&w->mutex);
+
+        if (has_item) {
+            int rc = -1;
+            if (item.spec.transport == ACTION_TRANSPORT_UDP) {
+                rc = send_udp(w, item.index, &item.spec);
+            } else {
+                rc = send_http(&item.spec);
+            }
+            if (rc != 0) {
+                /* Log failure if needed, but we don't have access to cfg here easily.
+                   We could add verbose flag to worker if we really wanted to log from here. */
+                // fprintf(stderr, "Action failed: %s\n", item.spec.destination);
+            }
+        }
+    }
+    return NULL;
+}
+
+void action_keys_worker_init(action_worker_t *worker, int priority)
+{
+    if (!worker) return;
+    memset(worker, 0, sizeof(*worker));
+    worker->priority = priority;
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT);
+    pthread_mutex_init(&worker->mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+
+    pthread_cond_init(&worker->cond, NULL);
+    worker->running = 1;
+    for (int i = 0; i < ACTION_MAX; i++) {
+        worker->sockets[i] = -1;
+    }
+
+    if (pthread_create(&worker->thread, NULL, action_worker_thread, worker) != 0) {
+        perror("pthread_create");
+        worker->running = 0;
+    }
+}
+
+void action_keys_worker_stop(action_worker_t *worker)
+{
+    if (!worker) return;
+
+    pthread_mutex_lock(&worker->mutex);
+    worker->running = 0;
+    pthread_cond_broadcast(&worker->cond);
+    pthread_mutex_unlock(&worker->mutex);
+
+    if (worker->thread) {
+        pthread_join(worker->thread, NULL);
+        worker->thread = 0;
+    }
+
+    pthread_mutex_destroy(&worker->mutex);
+    pthread_cond_destroy(&worker->cond);
+
+    for (int i = 0; i < ACTION_MAX; i++) {
+        if (worker->sockets[i] >= 0) {
+            close(worker->sockets[i]);
+            worker->sockets[i] = -1;
+        }
+    }
+}
+
+static void enqueue_action(action_worker_t *worker, int index, const action_spec_t *spec)
+{
+    if (!worker || !worker->running) return;
+
+    pthread_mutex_lock(&worker->mutex);
+    int next_tail = (worker->tail + 1) % ACTION_QUEUE_SIZE;
+    if (next_tail != worker->head) {
+        worker->queue[worker->tail].index = index;
+        worker->queue[worker->tail].spec = *spec;
+        worker->tail = next_tail;
+        pthread_cond_signal(&worker->cond);
+    } else {
+        fprintf(stderr, "Action queue full, dropping action for %s\n", spec->destination);
+    }
+    pthread_mutex_unlock(&worker->mutex);
+}
+
 void action_keys_config_defaults(action_keys_config_t *cfg)
 {
     cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
+    cfg->debounce_ms = ACTION_DEBOUNCE_MS_DEFAULT;
     cfg->verbose = 1;
     cfg->action_count = 0;
     memset(cfg->actions, 0, sizeof(cfg->actions));
@@ -503,7 +567,6 @@ static int parse_action(const action_keys_config_t *cfg, const char *val, action
         }
         *eq = '\0';
         char *val = eq + 1;
-        char *next = val;
         int is_body = (!strcasecmp(key, "body") || !strcasecmp(key, "payload"));
         if (!is_body) {
             char *comma = strchr(val, ',');
@@ -667,6 +730,11 @@ int action_keys_config_load(action_keys_config_t *cfg, const char *path)
             if (cfg->http_timeout_ms <= 0) {
                 cfg->http_timeout_ms = ACTION_HTTP_TIMEOUT_MS_DEFAULT;
             }
+        } else if (!strcasecmp(key, "action_debounce_ms")) {
+            cfg->debounce_ms = atoi(val);
+            if (cfg->debounce_ms < 0) {
+                cfg->debounce_ms = 0;
+            }
         } else if (!strcasecmp(key, "verbose")) {
             cfg->verbose = atoi(val) ? 1 : 0;
         } else if (!strncasecmp(key, "action_", 7)) {
@@ -698,7 +766,7 @@ static int64_t timespec_diff_ms_local(const struct timespec *start, const struct
 }
 
 void action_keys_handle_press(const action_keys_config_t *cfg,
-                              action_binding_t bindings[ACTION_MAX],
+                              action_worker_t *worker,
                               action_state_t *state,
                               int channel_index,
                               action_edge_t edge,
@@ -718,20 +786,22 @@ void action_keys_handle_press(const action_keys_config_t *cfg,
         }
 
         int64_t diff = timespec_diff_ms_local(&state->last_dispatch, now);
-        if (diff >= ACTION_DEBOUNCE_MS) {
-            int rc = dispatch(&bindings[i]);
-            maybe_log(cfg, a, "action", rc);
+        if (diff >= cfg->debounce_ms) {
+            enqueue_action(worker, (int)i, a);
+            maybe_log(cfg, a, "action (queued)", 0);
             state->last_dispatch = *now;
             state->pending_idx = -1;
         } else {
+            if (state->pending_idx != (int)i) {
+                maybe_log(cfg, a, "action (pending)", 0);
+            }
             state->pending_idx = (int)i;
-            maybe_log(cfg, a, "action (queued)", 0);
         }
     }
 }
 
 void action_keys_process_pending(const action_keys_config_t *cfg,
-                                 action_binding_t bindings[ACTION_MAX],
+                                 action_worker_t *worker,
                                  action_state_t *state,
                                  const struct timespec *now)
 {
@@ -744,9 +814,9 @@ void action_keys_process_pending(const action_keys_config_t *cfg,
     }
 
     int64_t diff = timespec_diff_ms_local(&state->last_dispatch, now);
-    if (diff >= ACTION_DEBOUNCE_MS) {
-        int rc = dispatch(&bindings[state->pending_idx]);
-        maybe_log(cfg, &cfg->actions[state->pending_idx], "action (pending)", rc);
+    if (diff >= cfg->debounce_ms) {
+        enqueue_action(worker, state->pending_idx, &cfg->actions[state->pending_idx]);
+        maybe_log(cfg, &cfg->actions[state->pending_idx], "action (queued from pending)", 0);
         state->last_dispatch = *now;
         state->pending_idx = -1;
     }
