@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <sys/socket.h>
+#include <time.h>
 
 #define ACTION_MAX                     32
 #define ACTION_MAX_BODY_LEN            512
@@ -52,6 +53,7 @@ typedef struct {
     int udp_fd;
     struct sockaddr_storage udp_addr;
     socklen_t udp_addrlen;
+    struct timespec last_dispatch;
 } action_binding_t;
 
 typedef struct {

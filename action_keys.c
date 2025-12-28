@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,8 @@
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+
+#define ACTION_DEBOUNCE_MS 500
 
 static void trim(char *s)
 {
@@ -145,6 +148,35 @@ static void free_binding(action_binding_t *b)
     b->udp_fd = -1;
 }
 
+static int64_t timespec_diff_ms(const struct timespec *start, const struct timespec *end)
+{
+    int64_t sec = (int64_t)end->tv_sec - (int64_t)start->tv_sec;
+    int64_t nsec = (int64_t)end->tv_nsec - (int64_t)start->tv_nsec;
+    if (nsec < 0) {
+        sec -= 1;
+        nsec += 1000000000L;
+    }
+    return sec * 1000 + nsec / 1000000L;
+}
+
+static int debounced(action_binding_t *b)
+{
+    if (!b) {
+        return 0;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (b->last_dispatch.tv_sec == 0 && b->last_dispatch.tv_nsec == 0) {
+        b->last_dispatch = now;
+        return 0;
+    }
+    if (timespec_diff_ms(&b->last_dispatch, &now) < ACTION_DEBOUNCE_MS) {
+        return 1;
+    }
+    b->last_dispatch = now;
+    return 0;
+}
+
 void action_keys_bindings_init(const action_keys_config_t *cfg,
                                action_binding_t bindings[ACTION_MAX])
 {
@@ -154,6 +186,7 @@ void action_keys_bindings_init(const action_keys_config_t *cfg,
     for (size_t i = 0; i < ACTION_MAX; i++) {
         memset(&bindings[i], 0, sizeof(action_binding_t));
         bindings[i].udp_fd = -1;
+        bindings[i].last_dispatch = (struct timespec){0, 0};
     }
     for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
         bindings[i].spec = cfg->actions[i];
@@ -443,6 +476,9 @@ static int dispatch(action_binding_t *b)
 {
     if (!b) {
         return -1;
+    }
+    if (debounced(b)) {
+        return 0;
     }
     if (b->spec.transport == ACTION_TRANSPORT_UDP) {
         return send_udp(b);
