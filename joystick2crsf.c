@@ -1432,14 +1432,17 @@ int main(int argc, char **argv)
 
             struct timespec wait_start = now;
             SDL_Event ev;
-            int have_event = SDL_WaitEventTimeout(&ev, wait_ms);
-            if (have_event) {
-                if (ev.type == SDL_JOYDEVICEADDED ||
-                    ev.type == SDL_JOYDEVICEREMOVED ||
-                    ev.type == SDL_CONTROLLERDEVICEADDED ||
-                    ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-                    next_rescan = now;
-                }
+            int have_event = 0;
+            if (SDL_WaitEventTimeout(&ev, wait_ms)) {
+                have_event = 1;
+                do {
+                    if (ev.type == SDL_JOYDEVICEADDED ||
+                        ev.type == SDL_JOYDEVICEREMOVED ||
+                        ev.type == SDL_CONTROLLERDEVICEADDED ||
+                        ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                        next_rescan = now;
+                    }
+                } while (SDL_PollEvent(&ev));
             }
 
             clock_gettime(CLOCK_MONOTONIC, &now);
