@@ -124,6 +124,10 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd >= 0) {
+            int flags = fcntl(fd, F_GETFL, 0);
+            if (flags >= 0 && !(flags & O_NONBLOCK)) {
+                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+            }
             memcpy(addr, ai->ai_addr, ai->ai_addrlen);
             *addrlen = (socklen_t)ai->ai_addrlen;
             break;
@@ -229,7 +233,15 @@ static int send_udp(action_binding_t *b)
     }
     ssize_t n = sendto(b->udp_fd, b->spec.body, b->spec.body_len, MSG_NOSIGNAL,
                        (struct sockaddr *)&b->udp_addr, b->udp_addrlen);
-    return (n < 0) ? -1 : 0;
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return -1;
+        }
+        close(b->udp_fd);
+        b->udp_fd = -1;
+        return -1;
+    }
+    return 0;
 }
 
 static int parse_http_url(const char *url, char **host_out, char **port_out, char **path_out)
