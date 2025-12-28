@@ -400,12 +400,17 @@ static void *action_worker_thread(void *arg)
 {
     action_worker_t *w = (action_worker_t *)arg;
 
-    /* Set worker to RT priority but lower than main loop (50) to avoid starvation
-       while remaining responsive enough to clear the queue */
+    /* Set worker priority. If <= 0, use SCHED_OTHER (non-RT).
+       Otherwise try SCHED_FIFO with the requested priority. */
     struct sched_param param;
-    param.sched_priority = 20;
-    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
-        /* Fallback to normal priority if RT is not available */
+    if (w->priority > 0) {
+        param.sched_priority = w->priority;
+        if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
+            /* Fallback to normal if RT fails */
+            param.sched_priority = 0;
+            pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+        }
+    } else {
         param.sched_priority = 0;
         pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
     }
@@ -445,10 +450,11 @@ static void *action_worker_thread(void *arg)
     return NULL;
 }
 
-void action_keys_worker_init(action_worker_t *worker)
+void action_keys_worker_init(action_worker_t *worker, int priority)
 {
     if (!worker) return;
     memset(worker, 0, sizeof(*worker));
+    worker->priority = priority;
 
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);

@@ -117,6 +117,7 @@ typedef struct {
     int startup_delay;          /* seconds */
     int use_gamecontroller;
     int key_long_threshold_ms;
+    int scheduler_prio;         /* SCHED_FIFO priority, or <= 0 for non-RT */
 } config_t;
 
 typedef struct {
@@ -596,9 +597,19 @@ static int sse_send_frame(int fd, const uint16_t ch[16], const int32_t raw[16])
 
 static void try_rt(int prio)
 {
+    if (prio <= 0) {
+        struct sched_param sp = { .sched_priority = 0 };
+        if (sched_setscheduler(0, SCHED_OTHER, &sp) == 0) {
+            fprintf(stderr, "◎ SCHED_OTHER (non-RT)\n");
+        }
+        return;
+    }
     struct sched_param sp = { .sched_priority = prio };
     if (!sched_setscheduler(0, SCHED_FIFO, &sp)) {
         fprintf(stderr, "◎ SCHED_FIFO %d\n", prio);
+    } else {
+        perror("sched_setscheduler");
+        fprintf(stderr, "Warning: Failed to set real-time priority. Running as normal process.\n");
     }
 }
 
@@ -925,6 +936,7 @@ static void config_defaults(config_t *cfg)
     cfg->startup_delay = 5;
     cfg->use_gamecontroller = 1;
     cfg->key_long_threshold_ms = KEY_LONG_DEFAULT_MS;
+    cfg->scheduler_prio = 50;
     for (int i = 0; i < 16; i++) {
         cfg->map[i] = i;
         cfg->invert[i] = 0;
@@ -1037,6 +1049,8 @@ static int config_load(config_t *cfg, const char *path)
             }
         } else if (!strcasecmp(key, "key_long_threshold_ms")) {
             cfg->key_long_threshold_ms = atoi(val);
+        } else if (!strcasecmp(key, "scheduler_prio")) {
+            cfg->scheduler_prio = atoi(val);
         } else if (!strncasecmp(key, "key_short", 9) ||
                    !strncasecmp(key, "key_long", 8) ||
                    !strcasecmp(key, "key_debug")) {
@@ -1166,13 +1180,13 @@ static void reset_key_tracking(int key_active[16], int key_low_active[16],
     memset(key_low_start, 0, sizeof(struct timespec) * 16);
 }
 
-static void action_keys_runtime_init(action_keys_runtime_t *ak)
+static void action_keys_runtime_init(action_keys_runtime_t *ak, int worker_prio)
 {
     if (!ak) {
         return;
     }
     memset(ak, 0, sizeof(*ak));
-    action_keys_worker_init(&ak->worker);
+    action_keys_worker_init(&ak->worker, worker_prio);
     ak->state.pending_idx = -1;
     // state.last_dispatch is 0 (epoch), allowing immediate first action
     for (int i = 0; i < 16; i++) {
@@ -1183,7 +1197,8 @@ static void action_keys_runtime_init(action_keys_runtime_t *ak)
 
 static void action_keys_runtime_reload(action_keys_runtime_t *ak,
                                        const char *path,
-                                       int warn_missing)
+                                       int warn_missing,
+                                       int worker_prio)
 {
     if (!ak) {
         return;
@@ -1192,7 +1207,7 @@ static void action_keys_runtime_reload(action_keys_runtime_t *ak,
     /* Stop old worker to close sockets and clear queue */
     action_keys_worker_stop(&ak->worker);
     /* Re-init worker (fresh state) */
-    action_keys_worker_init(&ak->worker);
+    action_keys_worker_init(&ak->worker, worker_prio);
 
     if (path && access(path, R_OK) != 0) {
         if (warn_missing) {
@@ -1252,8 +1267,6 @@ int main(int argc, char **argv)
     int startup_delay_applied = 0;
     int action_keys_warned_missing = 0;
 
-    try_rt(50);
-
     while (g_run) {
         config_t cfg;
         config_defaults(&cfg);
@@ -1267,11 +1280,20 @@ int main(int argc, char **argv)
             break;
         }
 
+        try_rt(cfg.scheduler_prio);
+
+        int worker_prio = 0;
+        if (cfg.scheduler_prio > 0) {
+            /* If main loop is RT, run worker at lower RT priority */
+            worker_prio = (cfg.scheduler_prio > 10) ? 20 : (cfg.scheduler_prio / 2);
+        }
+
         action_keys_runtime_t action_keys;
-        action_keys_runtime_init(&action_keys);
+        action_keys_runtime_init(&action_keys, worker_prio);
         int action_conf_readable = (access(conf_path, R_OK) == 0);
         action_keys_runtime_reload(&action_keys, conf_path,
-                                   !action_conf_readable && !action_keys_warned_missing);
+                                   !action_conf_readable && !action_keys_warned_missing,
+                                   worker_prio);
         if (!action_conf_readable) {
             action_keys_warned_missing = 1;
         }
@@ -1445,8 +1467,8 @@ int main(int argc, char **argv)
                         next_rescan = now;
                     }
                     events_processed++;
-                    if (events_processed >= 100) {
-                        fprintf(stderr, "Warning: Event queue overflow, capped at 100 events.\n");
+                    if (events_processed >= 2000) {
+                        fprintf(stderr, "Warning: Event queue overflow, capped at 2000 events.\n");
                         break;
                     }
                 } while (SDL_PollEvent(&ev));

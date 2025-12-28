@@ -70,6 +70,7 @@ typedef struct {
     int sockets[ACTION_MAX];
     struct sockaddr_storage socket_addrs[ACTION_MAX];
     socklen_t socket_addr_lens[ACTION_MAX];
+    int priority;
 } action_worker_t;
 
 typedef struct {
@@ -87,7 +88,7 @@ typedef struct {
 void action_keys_config_defaults(action_keys_config_t *cfg);
 int action_keys_config_load(action_keys_config_t *cfg, const char *path);
 
-void action_keys_worker_init(action_worker_t *worker);
+void action_keys_worker_init(action_worker_t *worker, int priority);
 void action_keys_worker_stop(action_worker_t *worker);
 
 void action_keys_handle_press(const action_keys_config_t *cfg,
