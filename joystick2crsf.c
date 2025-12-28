@@ -1255,9 +1255,7 @@ int main(int argc, char **argv)
     int startup_delay_applied = 0;
     int action_keys_warned_missing = 0;
 
-    /* Disabled realtime PRIO
-    try_rt(10);
-    */
+    try_rt(50);
 
     while (g_run) {
         config_t cfg;
