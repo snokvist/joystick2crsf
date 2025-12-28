@@ -10,7 +10,9 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -298,21 +300,60 @@ static int send_http(action_binding_t *b)
     }
 
     int fd = -1;
+    int restore_flags = -1;
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) {
             continue;
         }
+
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0 && !(flags & O_NONBLOCK)) {
+            if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0) {
+                restore_flags = flags;
+            }
+        }
+
         struct timeval tv;
         tv.tv_sec = b->spec.timeout_ms / 1000;
         tv.tv_usec = (b->spec.timeout_ms % 1000) * 1000;
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+
+        int rc_conn = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (rc_conn < 0 && errno == EINPROGRESS) {
+            struct pollfd pfd;
+            memset(&pfd, 0, sizeof(pfd));
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            int poll_rc = poll(&pfd, 1, b->spec.timeout_ms);
+            if (poll_rc > 0 && (pfd.revents & (POLLOUT | POLLERR | POLLHUP))) {
+                int soerr = 0;
+                socklen_t slen = sizeof(soerr);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen) == 0 && soerr == 0) {
+                    rc_conn = 0;
+                } else {
+                    errno = soerr;
+                    rc_conn = -1;
+                }
+            } else {
+                rc_conn = -1;
+                if (poll_rc == 0) {
+                    errno = ETIMEDOUT;
+                }
+            }
+        }
+
+        if (rc_conn == 0 && restore_flags >= 0) {
+            fcntl(fd, F_SETFL, restore_flags);
+        }
+
+        if (rc_conn == 0) {
             break;
         }
         close(fd);
         fd = -1;
+        restore_flags = -1;
     }
     freeaddrinfo(res);
     if (fd < 0) {
