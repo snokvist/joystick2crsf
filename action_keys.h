@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <pthread.h>
 
 #define ACTION_MAX                     32
 #define ACTION_DEBOUNCE_MS             500
@@ -13,6 +14,7 @@
 #define ACTION_MAX_DEST_LEN            256
 #define ACTION_HTTP_TIMEOUT_MS_DEFAULT 1500
 #define ACTION_KEYS_DEFAULT_CONF       "/etc/joystick2crsf.conf"
+#define ACTION_QUEUE_SIZE              64
 
 typedef enum {
     ACTION_TRANSPORT_UDP = 0,
@@ -51,10 +53,24 @@ typedef struct {
 
 typedef struct {
     action_spec_t spec;
-    int udp_fd;
-    struct sockaddr_storage udp_addr;
-    socklen_t udp_addrlen;
-} action_binding_t;
+    int index; /* To map to cached socket */
+} action_queue_item_t;
+
+typedef struct {
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int running;
+
+    action_queue_item_t queue[ACTION_QUEUE_SIZE];
+    int head;
+    int tail;
+
+    /* Cached UDP sockets: index corresponds to config->actions index */
+    int sockets[ACTION_MAX];
+    struct sockaddr_storage socket_addrs[ACTION_MAX];
+    socklen_t socket_addr_lens[ACTION_MAX];
+} action_worker_t;
 
 typedef struct {
     struct timespec last_dispatch;
@@ -71,12 +87,11 @@ typedef struct {
 void action_keys_config_defaults(action_keys_config_t *cfg);
 int action_keys_config_load(action_keys_config_t *cfg, const char *path);
 
-void action_keys_bindings_init(const action_keys_config_t *cfg,
-                               action_binding_t bindings[ACTION_MAX]);
-void action_keys_free_bindings(action_binding_t bindings[ACTION_MAX]);
+void action_keys_worker_init(action_worker_t *worker);
+void action_keys_worker_stop(action_worker_t *worker);
 
 void action_keys_handle_press(const action_keys_config_t *cfg,
-                              action_binding_t bindings[ACTION_MAX],
+                              action_worker_t *worker,
                               action_state_t *state,
                               int channel_index,
                               action_edge_t edge,
@@ -84,7 +99,7 @@ void action_keys_handle_press(const action_keys_config_t *cfg,
                               const struct timespec *now);
 
 void action_keys_process_pending(const action_keys_config_t *cfg,
-                                 action_binding_t bindings[ACTION_MAX],
+                                 action_worker_t *worker,
                                  action_state_t *state,
                                  const struct timespec *now);
 

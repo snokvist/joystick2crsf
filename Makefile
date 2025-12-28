@@ -17,8 +17,8 @@ SDL2_LIBS ?= $(shell $(PKG_CONFIG) --libs sdl2)
 CURL_CFLAGS ?=
 CURL_LIBS ?=
 
-CFLAGS ?= -O2 -g -Wall -Wextra
-LDFLAGS ?=
+CFLAGS ?= -O2 -g -Wall -Wextra -pthread
+LDFLAGS ?= -pthread
 LIBS := $(SDL2_LIBS)
 
 INSTALL ?= install

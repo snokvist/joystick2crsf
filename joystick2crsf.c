@@ -121,7 +121,7 @@ typedef struct {
 
 typedef struct {
     action_keys_config_t cfg;
-    action_binding_t bindings[ACTION_MAX];
+    action_worker_t worker;
     action_state_t state;
     int watch_high[16];
     int watch_low[16];
@@ -1172,9 +1172,7 @@ static void action_keys_runtime_init(action_keys_runtime_t *ak)
         return;
     }
     memset(ak, 0, sizeof(*ak));
-    for (size_t i = 0; i < ACTION_MAX; i++) {
-        ak->bindings[i].udp_fd = -1;
-    }
+    action_keys_worker_init(&ak->worker);
     ak->state.pending_idx = -1;
     // state.last_dispatch is 0 (epoch), allowing immediate first action
     for (int i = 0; i < 16; i++) {
@@ -1191,10 +1189,10 @@ static void action_keys_runtime_reload(action_keys_runtime_t *ak,
         return;
     }
 
-    action_keys_free_bindings(ak->bindings);
-    for (size_t i = 0; i < ACTION_MAX; i++) {
-        ak->bindings[i].udp_fd = -1;
-    }
+    /* Stop old worker to close sockets and clear queue */
+    action_keys_worker_stop(&ak->worker);
+    /* Re-init worker (fresh state) */
+    action_keys_worker_init(&ak->worker);
 
     if (path && access(path, R_OK) != 0) {
         if (warn_missing) {
@@ -1208,7 +1206,6 @@ static void action_keys_runtime_reload(action_keys_runtime_t *ak,
 
     action_keys_config_defaults(&ak->cfg);
     if (action_keys_config_load(&ak->cfg, path) == 0 && ak->cfg.action_count > 0) {
-        action_keys_bindings_init(&ak->cfg, ak->bindings);
         action_keys_build_watchlist(&ak->cfg, ak->watch_high, ak->watch_low);
         ak->enabled = 1;
         if (ak->cfg.verbose) {
@@ -1695,7 +1692,7 @@ int main(int argc, char **argv)
                             int64_t held = timespec_diff_ms(&key_press_start[i], &now);
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
-                            action_keys_handle_press(&action_keys.cfg, action_keys.bindings,
+                            action_keys_handle_press(&action_keys.cfg, &action_keys.worker,
                                                      &action_keys.state, i, ACTION_EDGE_HIGH, press, &now);
                             key_press_active[i] = 0;
                         }
@@ -1711,13 +1708,13 @@ int main(int argc, char **argv)
                             int64_t held = timespec_diff_ms(&key_press_low_start[i], &now);
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
-                            action_keys_handle_press(&action_keys.cfg, action_keys.bindings,
+                            action_keys_handle_press(&action_keys.cfg, &action_keys.worker,
                                                      &action_keys.state, i, ACTION_EDGE_LOW, press, &now);
                             key_press_low_active[i] = 0;
                         }
                     }
                 }
-                action_keys_process_pending(&action_keys.cfg, action_keys.bindings,
+                action_keys_process_pending(&action_keys.cfg, &action_keys.worker,
                                             &action_keys.state, &now);
             }
 
@@ -1856,7 +1853,7 @@ int main(int argc, char **argv)
             close(sse_fd);
             sse_fd = -1;
         }
-        action_keys_free_bindings(action_keys.bindings);
+        action_keys_worker_stop(&action_keys.worker);
 
         if (fatal_error || !g_run) {
             break;
