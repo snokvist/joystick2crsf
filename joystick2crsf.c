@@ -122,6 +122,7 @@ typedef struct {
 typedef struct {
     action_keys_config_t cfg;
     action_binding_t bindings[ACTION_MAX];
+    action_state_t state;
     int watch_high[16];
     int watch_low[16];
     int enabled;
@@ -1174,6 +1175,8 @@ static void action_keys_runtime_init(action_keys_runtime_t *ak)
     for (size_t i = 0; i < ACTION_MAX; i++) {
         ak->bindings[i].udp_fd = -1;
     }
+    ak->state.pending_idx = -1;
+    // state.last_dispatch is 0 (epoch), allowing immediate first action
     for (int i = 0; i < 16; i++) {
         ak->watch_high[i] = 0;
         ak->watch_low[i] = 0;
@@ -1686,7 +1689,7 @@ int main(int argc, char **argv)
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
                             action_keys_handle_press(&action_keys.cfg, action_keys.bindings,
-                                                     i, ACTION_EDGE_HIGH, press);
+                                                     &action_keys.state, i, ACTION_EDGE_HIGH, press, &now);
                             key_press_active[i] = 0;
                         }
                     }
@@ -1702,11 +1705,13 @@ int main(int argc, char **argv)
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
                             action_keys_handle_press(&action_keys.cfg, action_keys.bindings,
-                                                     i, ACTION_EDGE_LOW, press);
+                                                     &action_keys.state, i, ACTION_EDGE_LOW, press, &now);
                             key_press_low_active[i] = 0;
                         }
                     }
                 }
+                action_keys_process_pending(&action_keys.cfg, action_keys.bindings,
+                                            &action_keys.state, &now);
             }
 
             int ready_for_frame = (timespec_cmp(&now, &next_frame) >= 0);

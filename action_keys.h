@@ -3,8 +3,10 @@
 
 #include <stddef.h>
 #include <sys/socket.h>
+#include <time.h>
 
 #define ACTION_MAX                     32
+#define ACTION_DEBOUNCE_MS             500
 #define ACTION_MAX_BODY_LEN            512
 #define ACTION_MAX_HEADER_LEN          128
 #define ACTION_MAX_HEADERS             8
@@ -55,6 +57,11 @@ typedef struct {
 } action_binding_t;
 
 typedef struct {
+    struct timespec last_dispatch;
+    int pending_idx;
+} action_state_t;
+
+typedef struct {
     int http_timeout_ms;
     int verbose;
     size_t action_count;
@@ -70,9 +77,16 @@ void action_keys_free_bindings(action_binding_t bindings[ACTION_MAX]);
 
 void action_keys_handle_press(const action_keys_config_t *cfg,
                               action_binding_t bindings[ACTION_MAX],
+                              action_state_t *state,
                               int channel_index,
                               action_edge_t edge,
-                              action_press_t press);
+                              action_press_t press,
+                              const struct timespec *now);
+
+void action_keys_process_pending(const action_keys_config_t *cfg,
+                                 action_binding_t bindings[ACTION_MAX],
+                                 action_state_t *state,
+                                 const struct timespec *now);
 
 void action_keys_build_watchlist(const action_keys_config_t *cfg,
                                  int watch_high[16],
