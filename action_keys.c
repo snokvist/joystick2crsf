@@ -19,10 +19,23 @@
 #include <time.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+
+static int set_nonblock(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    return 0;
+}
 
 static void trim(char *s)
 {
@@ -127,6 +140,8 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
     freeaddrinfo(res);
     if (fd < 0) {
         perror("udp socket");
+    } else {
+        set_nonblock(fd);
     }
     return fd;
 }
@@ -406,7 +421,19 @@ static int dispatch(action_binding_t *b)
     if (b->spec.transport == ACTION_TRANSPORT_UDP) {
         return send_udp(b);
     }
-    return send_http(b);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child process */
+        int rc = send_http(b);
+        _exit(rc);
+    } else if (pid > 0) {
+        /* Parent process */
+        return 0;
+    }
+
+    perror("fork");
+    return -1;
 }
 
 static void maybe_log(const action_keys_config_t *cfg,

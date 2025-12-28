@@ -1226,6 +1226,7 @@ int main(int argc, char **argv)
 
     signal(SIGINT, on_sigint);
     signal(SIGHUP, on_sighup);
+    signal(SIGCHLD, SIG_IGN);
 
     config_t cfg;
     config_defaults(&cfg);
