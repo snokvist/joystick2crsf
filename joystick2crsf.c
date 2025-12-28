@@ -1447,12 +1447,6 @@ int main(int argc, char **argv)
 
             clock_gettime(CLOCK_MONOTONIC, &now);
 
-            if (!have_event && timespec_cmp(&now, &deadline) < 0) {
-                if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL) == 0) {
-                    clock_gettime(CLOCK_MONOTONIC, &now);
-                }
-            }
-
             double waited_s = (double)timespec_diff_ns(&wait_start, &now) / 1e9;
             if (waited_s < wait_min) {
                 wait_min = waited_s;
@@ -1475,8 +1469,6 @@ int main(int argc, char **argv)
                 break;
             }
 
-            SDL_GameControllerUpdate();
-            SDL_JoystickUpdate();
             if (gc && !SDL_GameControllerGetAttached(gc)) {
                 fprintf(stderr, "Game controller %d detached\n", cfg.joystick_index);
                 SDL_GameControllerClose(gc);
