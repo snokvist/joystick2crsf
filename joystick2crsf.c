@@ -1374,6 +1374,13 @@ static int action_queue_start_worker(action_queue_t *q,
         return -1;
     }
 
+    struct sched_param sp;
+    memset(&sp, 0, sizeof(sp));
+    if (pthread_setschedparam(q->worker_thread, SCHED_OTHER, &sp) != 0) {
+        fprintf(stderr, "Action worker: unable to drop to SCHED_OTHER (%s)\n",
+                strerror(errno));
+    }
+
     return 0;
 }
 
