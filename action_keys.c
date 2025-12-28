@@ -10,7 +10,9 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,8 +141,7 @@ static void free_binding(action_binding_t *b)
     if (b->udp_fd >= 0) {
         close(b->udp_fd);
     }
-    memset(b, 0, sizeof(*b));
-    b->udp_fd = -1;
+    action_binding_reset(b);
 }
 
 void action_keys_bindings_init(const action_keys_config_t *cfg,
@@ -150,11 +151,11 @@ void action_keys_bindings_init(const action_keys_config_t *cfg,
         return;
     }
     for (size_t i = 0; i < ACTION_MAX; i++) {
-        memset(&bindings[i], 0, sizeof(action_binding_t));
-        bindings[i].udp_fd = -1;
+        action_binding_reset(&bindings[i]);
     }
     for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
         bindings[i].spec = cfg->actions[i];
+        action_binding_prepare(&bindings[i]);
     }
 }
 
@@ -181,6 +182,12 @@ static int init_udp(action_binding_t *b)
         dest += 6;
     }
     b->udp_fd = open_udp_target(dest, &b->udp_addr, &b->udp_addrlen);
+    if (b->udp_fd >= 0) {
+        int flags = fcntl(b->udp_fd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(b->udp_fd, F_SETFL, flags | O_NONBLOCK);
+        }
+    }
     return b->udp_fd >= 0 ? 0 : -1;
 }
 
@@ -269,11 +276,21 @@ static int parse_http_url(const char *url, char **host_out, char **port_out, cha
     return 0;
 }
 
-static int send_http(action_binding_t *b)
+static void action_binding_reset(action_binding_t *b)
+{
+    if (!b) {
+        return;
+    }
+    memset(b, 0, sizeof(*b));
+    b->udp_fd = -1;
+}
+
+static int action_binding_prepare_http(action_binding_t *b)
 {
     if (!b) {
         return -1;
     }
+
     char *host = NULL;
     char *port = NULL;
     char *path = NULL;
@@ -297,41 +314,91 @@ static int send_http(action_binding_t *b)
         return -1;
     }
 
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) {
-            continue;
-        }
-        struct timeval tv;
-        tv.tv_sec = b->spec.timeout_ms / 1000;
-        tv.tv_usec = (b->spec.timeout_ms % 1000) * 1000;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-            break;
-        }
-        close(fd);
-        fd = -1;
-    }
+    bzero(&b->http_addr, sizeof(b->http_addr));
+    memcpy(&b->http_addr, res->ai_addr, res->ai_addrlen);
+    b->http_addrlen = (socklen_t)res->ai_addrlen;
+    b->http_ai_family = res->ai_family;
+    b->http_ai_socktype = res->ai_socktype;
+    b->http_ai_protocol = res->ai_protocol;
+    snprintf(b->http_host, sizeof(b->http_host), "%s", host);
+    snprintf(b->http_port, sizeof(b->http_port), "%s", port);
+    snprintf(b->http_path, sizeof(b->http_path), "%s", path);
+
     freeaddrinfo(res);
-    if (fd < 0) {
-        free(host);
-        free(port);
-        free(path);
+    free(host);
+    free(port);
+    free(path);
+    return 0;
+}
+
+static int action_binding_prepare(action_binding_t *b)
+{
+    if (!b) {
         return -1;
+    }
+    if (b->prepared) {
+        return (b->prepared > 0) ? 0 : -1;
+    }
+
+    if (b->spec.transport == ACTION_TRANSPORT_HTTP) {
+        if (action_binding_prepare_http(b) < 0) {
+            b->prepared = -1;
+            return -1;
+        }
+    }
+
+    b->prepared = 1;
+    return 0;
+}
+
+static int send_http(action_binding_t *b)
+{
+    if (!b) {
+        return -1;
+    }
+    if (action_binding_prepare(b) < 0) {
+        return -1;
+    }
+    if (b->prepared < 0) {
+        return -1;
+    }
+
+    int fd = socket(b->http_ai_family, b->http_ai_socktype, b->http_ai_protocol);
+    if (fd < 0) {
+        return -1;
+    }
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    int rc = connect(fd, (struct sockaddr *)&b->http_addr, b->http_addrlen);
+    if (rc < 0 && errno != EINPROGRESS) {
+        close(fd);
+        return -1;
+    }
+    if (rc < 0 && errno == EINPROGRESS) {
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+        int prc = poll(&pfd, 1, b->spec.timeout_ms);
+        if (prc <= 0) {
+            close(fd);
+            return -1;
+        }
+        int soerr = 0;
+        socklen_t slen = sizeof(soerr);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0 || soerr != 0) {
+            close(fd);
+            return -1;
+        }
     }
 
     char req[2048];
     const char *method = (b->spec.method == ACTION_HTTP_POST) ? "POST" : "GET";
     int written = snprintf(req, sizeof(req),
                            "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: action_keys\r\n",
-                           method, path, host);
+                           method, b->http_path, b->http_host);
     if (written < 0 || (size_t)written >= sizeof(req)) {
         close(fd);
-        free(host);
-        free(port);
-        free(path);
         return -1;
     }
     size_t off = (size_t)written;
@@ -339,9 +406,6 @@ static int send_http(action_binding_t *b)
         int n = snprintf(req + off, sizeof(req) - off, "%s\r\n", b->spec.headers[i]);
         if (n < 0 || (size_t)n >= sizeof(req) - off) {
             close(fd);
-            free(host);
-            free(port);
-            free(path);
             return -1;
         }
         off += (size_t)n;
@@ -352,49 +416,49 @@ static int send_http(action_binding_t *b)
                          b->spec.body_len);
         if (n < 0 || (size_t)n >= sizeof(req) - off) {
             close(fd);
-            free(host);
-            free(port);
-            free(path);
             return -1;
         }
         off += (size_t)n;
     }
     if (off + 2 >= sizeof(req)) {
         close(fd);
-        free(host);
-        free(port);
-        free(path);
         return -1;
     }
     req[off++] = '\r';
     req[off++] = '\n';
 
+    struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+    if (poll(&pfd, 1, b->spec.timeout_ms) <= 0) {
+        close(fd);
+        return -1;
+    }
     ssize_t n = send(fd, req, off, MSG_NOSIGNAL);
     if (n < 0) {
         close(fd);
-        free(host);
-        free(port);
-        free(path);
         return -1;
     }
     if (b->spec.method == ACTION_HTTP_POST && b->spec.body_len > 0) {
+        pfd.events = POLLOUT;
+        if (poll(&pfd, 1, b->spec.timeout_ms) <= 0) {
+            close(fd);
+            return -1;
+        }
         ssize_t nb = send(fd, b->spec.body, b->spec.body_len, MSG_NOSIGNAL);
         if (nb < 0) {
             close(fd);
-            free(host);
-            free(port);
-            free(path);
             return -1;
         }
     }
 
     char discard[512];
-    while (recv(fd, discard, sizeof(discard), 0) > 0) {
+    pfd.events = POLLIN;
+    while (poll(&pfd, 1, b->spec.timeout_ms) > 0) {
+        ssize_t r = recv(fd, discard, sizeof(discard), 0);
+        if (r <= 0) {
+            break;
+        }
     }
     close(fd);
-    free(host);
-    free(port);
-    free(path);
     return 0;
 }
 

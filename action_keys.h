@@ -52,6 +52,15 @@ typedef struct {
     int udp_fd;
     struct sockaddr_storage udp_addr;
     socklen_t udp_addrlen;
+    int prepared;
+    int http_ai_family;
+    int http_ai_socktype;
+    int http_ai_protocol;
+    struct sockaddr_storage http_addr;
+    socklen_t http_addrlen;
+    char http_host[ACTION_MAX_DEST_LEN];
+    char http_port[16];
+    char http_path[ACTION_MAX_DEST_LEN];
 } action_binding_t;
 
 typedef struct {
