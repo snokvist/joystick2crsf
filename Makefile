@@ -16,10 +16,13 @@ SDL2_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags sdl2)
 SDL2_LIBS ?= $(shell $(PKG_CONFIG) --libs sdl2)
 CURL_CFLAGS ?=
 CURL_LIBS ?=
+PTHREAD_CFLAGS ?= -pthread
+PTHREAD_LIBS ?= -pthread
 
 CFLAGS ?= -O2 -g -Wall -Wextra
+CFLAGS += $(PTHREAD_CFLAGS)
 LDFLAGS ?=
-LIBS := $(SDL2_LIBS)
+LIBS := $(SDL2_LIBS) $(PTHREAD_LIBS)
 
 INSTALL ?= install
 DESTDIR ?=

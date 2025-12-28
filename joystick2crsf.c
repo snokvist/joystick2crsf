@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdint.h>
@@ -142,6 +143,13 @@ typedef struct {
     size_t tail;
     size_t count;
     uint64_t drops;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int worker_running;
+    pthread_t worker_thread;
+    const action_keys_config_t *cfg;
+    action_binding_t *bindings;
+    long warn_threshold_ns;
 } action_queue_t;
 
 /* ------------------------------------------------------------------------- */
@@ -1203,6 +1211,8 @@ static void action_queue_init(action_queue_t *q)
         return;
     }
     memset(q, 0, sizeof(*q));
+    pthread_mutex_init(&q->mutex, NULL);
+    pthread_cond_init(&q->cond, NULL);
 }
 
 static int action_queue_enqueue(action_queue_t *q, int channel,
@@ -1212,11 +1222,15 @@ static int action_queue_enqueue(action_queue_t *q, int channel,
     if (!q) {
         return -1;
     }
+    if (pthread_mutex_lock(&q->mutex) != 0) {
+        return -1;
+    }
     if (q->count >= ACTION_QUEUE_MAX) {
         q->drops++;
         fprintf(stderr,
                 "Action queue full (%zu entries); dropping ch %d edge %d press %d\n",
                 q->count, channel, edge, press);
+        pthread_mutex_unlock(&q->mutex);
         return -1;
     }
 
@@ -1233,10 +1247,12 @@ static int action_queue_enqueue(action_queue_t *q, int channel,
 
     q->tail = (idx + 1U) % ACTION_QUEUE_MAX;
     q->count++;
+    pthread_cond_signal(&q->cond);
+    pthread_mutex_unlock(&q->mutex);
     return 0;
 }
 
-static int action_queue_pop(action_queue_t *q, action_queue_item_t *out)
+static int action_queue_pop_locked(action_queue_t *q, action_queue_item_t *out)
 {
     if (!q || !out || q->count == 0) {
         return -1;
@@ -1248,36 +1264,144 @@ static int action_queue_pop(action_queue_t *q, action_queue_item_t *out)
     return 0;
 }
 
-static void action_queue_process(action_queue_t *q,
-                                 const action_keys_config_t *cfg,
-                                 action_binding_t bindings[ACTION_MAX],
-                                 long warn_threshold_ns)
+static void action_queue_dispatch_item(const action_queue_item_t *item,
+                                       const action_keys_config_t *cfg,
+                                       action_binding_t bindings[ACTION_MAX],
+                                       long warn_threshold_ns)
+{
+    if (!item || !cfg || !bindings) {
+        return;
+    }
+
+    struct timespec dispatch_start;
+    struct timespec dispatch_end;
+    clock_gettime(CLOCK_MONOTONIC, &dispatch_start);
+    action_keys_handle_press(cfg, bindings, item->channel, item->edge, item->press);
+    clock_gettime(CLOCK_MONOTONIC, &dispatch_end);
+
+    if (item->enqueued_at.tv_sec || item->enqueued_at.tv_nsec) {
+        int64_t queued_ns = timespec_diff_ns(&item->enqueued_at, &dispatch_start);
+        if (queued_ns > warn_threshold_ns) {
+            double queued_ms = (double)queued_ns / 1e6;
+            fprintf(stderr,
+                    "Action queue delay ch %d edge %d press %d waited %.3f ms\n",
+                    item->channel, item->edge, item->press, queued_ms);
+        }
+    }
+
+    int64_t dispatch_ns = timespec_diff_ns(&dispatch_start, &dispatch_end);
+    if (dispatch_ns > warn_threshold_ns) {
+        double dispatch_ms = (double)dispatch_ns / 1e6;
+        fprintf(stderr,
+                "Action dispatch ch %d edge %d press %d took %.3f ms\n",
+                item->channel, item->edge, item->press, dispatch_ms);
+    }
+}
+
+static void action_queue_drain(action_queue_t *q,
+                               const action_keys_config_t *cfg,
+                               action_binding_t bindings[ACTION_MAX],
+                               long warn_threshold_ns)
 {
     if (!q || !cfg || !bindings) {
         return;
     }
 
-    action_queue_item_t item;
-    while (q->count > 0) {
-        if (action_queue_pop(q, &item) < 0) {
+    for (;;) {
+        pthread_mutex_lock(&q->mutex);
+        if (q->count == 0) {
+            pthread_mutex_unlock(&q->mutex);
+            break;
+        }
+        action_queue_item_t item;
+        if (action_queue_pop_locked(q, &item) < 0) {
+            pthread_mutex_unlock(&q->mutex);
+            break;
+        }
+        pthread_mutex_unlock(&q->mutex);
+        action_queue_dispatch_item(&item, cfg, bindings, warn_threshold_ns);
+    }
+}
+
+static void *action_queue_worker(void *arg)
+{
+    action_queue_t *q = (action_queue_t *)arg;
+    if (!q) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&q->mutex);
+    while (q->worker_running || q->count > 0) {
+        while (q->worker_running && q->count == 0) {
+            pthread_cond_wait(&q->cond, &q->mutex);
+        }
+        if (!q->worker_running && q->count == 0) {
             break;
         }
 
-        struct timespec dispatch_start;
-        struct timespec dispatch_end;
-        clock_gettime(CLOCK_MONOTONIC, &dispatch_start);
-        action_keys_handle_press(cfg, bindings,
-                                 item.channel, item.edge, item.press);
-        clock_gettime(CLOCK_MONOTONIC, &dispatch_end);
-
-        int64_t dispatch_ns = timespec_diff_ns(&dispatch_start, &dispatch_end);
-        if (dispatch_ns > warn_threshold_ns) {
-            double dispatch_ms = (double)dispatch_ns / 1e6;
-            fprintf(stderr,
-                    "Action dispatch ch %d edge %d press %d took %.3f ms\n",
-                    item.channel, item.edge, item.press, dispatch_ms);
+        action_queue_item_t item;
+        if (action_queue_pop_locked(q, &item) < 0) {
+            continue;
         }
+
+        pthread_mutex_unlock(&q->mutex);
+        action_queue_dispatch_item(&item, q->cfg, q->bindings,
+                                   q->warn_threshold_ns);
+        pthread_mutex_lock(&q->mutex);
     }
+    pthread_mutex_unlock(&q->mutex);
+    return NULL;
+}
+
+static int action_queue_start_worker(action_queue_t *q,
+                                     const action_keys_config_t *cfg,
+                                     action_binding_t bindings[ACTION_MAX],
+                                     long warn_threshold_ns)
+{
+    if (!q || !cfg || !bindings) {
+        return -1;
+    }
+
+    q->cfg = cfg;
+    q->bindings = bindings;
+    q->warn_threshold_ns = warn_threshold_ns;
+    q->worker_running = 1;
+
+    int rc = pthread_create(&q->worker_thread, NULL, action_queue_worker, q);
+    if (rc != 0) {
+        q->worker_running = 0;
+        fprintf(stderr, "Failed to start action worker: %s\n", strerror(rc));
+        return -1;
+    }
+
+    return 0;
+}
+
+static void action_queue_stop_worker(action_queue_t *q)
+{
+    if (!q) {
+        return;
+    }
+
+    int was_running = q->worker_running;
+    pthread_mutex_lock(&q->mutex);
+    q->worker_running = 0;
+    pthread_cond_broadcast(&q->cond);
+    pthread_mutex_unlock(&q->mutex);
+
+    if (was_running) {
+        pthread_join(q->worker_thread, NULL);
+    }
+}
+
+static void action_queue_destroy(action_queue_t *q)
+{
+    if (!q) {
+        return;
+    }
+
+    pthread_mutex_destroy(&q->mutex);
+    pthread_cond_destroy(&q->cond);
 }
 
 static void action_keys_runtime_reload(action_keys_runtime_t *ak,
@@ -1370,11 +1494,19 @@ int main(int argc, char **argv)
         action_keys_runtime_init(&action_keys);
         action_queue_t action_queue;
         action_queue_init(&action_queue);
+        int action_worker_started = 0;
         int action_conf_readable = (access(conf_path, R_OK) == 0);
         action_keys_runtime_reload(&action_keys, conf_path,
                                    !action_conf_readable && !action_keys_warned_missing);
         if (!action_conf_readable) {
             action_keys_warned_missing = 1;
+        }
+        if (action_keys.enabled) {
+            if (action_queue_start_worker(&action_queue, &action_keys.cfg,
+                                          action_keys.bindings,
+                                          ACTION_DISPATCH_WARN_NS) == 0) {
+                action_worker_started = 1;
+            }
         }
 
         if (!startup_delay_applied && cfg.startup_delay > 0) {
@@ -1870,10 +2002,10 @@ int main(int argc, char **argv)
                 }
             }
 
-            if (action_keys.enabled && action_queue.count > 0) {
-                action_queue_process(&action_queue, &action_keys.cfg,
-                                     action_keys.bindings,
-                                     ACTION_DISPATCH_WARN_NS);
+            if (action_keys.enabled && !action_worker_started) {
+                action_queue_drain(&action_queue, &action_keys.cfg,
+                                   action_keys.bindings,
+                                   ACTION_DISPATCH_WARN_NS);
             }
 
             if (cfg.stats) {
@@ -1957,6 +2089,8 @@ int main(int argc, char **argv)
             close(sse_fd);
             sse_fd = -1;
         }
+        action_queue_stop_worker(&action_queue);
+        action_queue_destroy(&action_queue);
         action_keys_free_bindings(action_keys.bindings);
 
         if (fatal_error || !g_run) {
