@@ -19,10 +19,23 @@
 #include <time.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+
+static int set_nonblock(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    return 0;
+}
 
 static void trim(char *s)
 {
@@ -127,6 +140,8 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
     freeaddrinfo(res);
     if (fd < 0) {
         perror("udp socket");
+    } else {
+        set_nonblock(fd);
     }
     return fd;
 }
@@ -406,7 +421,19 @@ static int dispatch(action_binding_t *b)
     if (b->spec.transport == ACTION_TRANSPORT_UDP) {
         return send_udp(b);
     }
-    return send_http(b);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child process */
+        int rc = send_http(b);
+        _exit(rc);
+    } else if (pid > 0) {
+        /* Parent process */
+        return 0;
+    }
+
+    perror("fork");
+    return -1;
 }
 
 static void maybe_log(const action_keys_config_t *cfg,
@@ -659,11 +686,24 @@ int action_keys_config_load(action_keys_config_t *cfg, const char *path)
     return 0;
 }
 
+static int64_t timespec_diff_ms_local(const struct timespec *start, const struct timespec *end)
+{
+    int64_t sec = (int64_t)end->tv_sec - (int64_t)start->tv_sec;
+    int64_t nsec = (int64_t)end->tv_nsec - (int64_t)start->tv_nsec;
+    if (nsec < 0) {
+        sec -= 1;
+        nsec += 1000000000L;
+    }
+    return sec * 1000 + nsec / 1000000L;
+}
+
 void action_keys_handle_press(const action_keys_config_t *cfg,
                               action_binding_t bindings[ACTION_MAX],
+                              action_state_t *state,
                               int channel_index,
                               action_edge_t edge,
-                              action_press_t press)
+                              action_press_t press,
+                              const struct timespec *now)
 {
     for (size_t i = 0; i < cfg->action_count && i < ACTION_MAX; i++) {
         const action_spec_t *a = &cfg->actions[i];
@@ -676,8 +716,39 @@ void action_keys_handle_press(const action_keys_config_t *cfg,
         if (a->press != ACTION_PRESS_ANY && a->press != press) {
             continue;
         }
-        int rc = dispatch(&bindings[i]);
-        maybe_log(cfg, a, "action", rc);
+
+        int64_t diff = timespec_diff_ms_local(&state->last_dispatch, now);
+        if (diff >= ACTION_DEBOUNCE_MS) {
+            int rc = dispatch(&bindings[i]);
+            maybe_log(cfg, a, "action", rc);
+            state->last_dispatch = *now;
+            state->pending_idx = -1;
+        } else {
+            state->pending_idx = (int)i;
+            maybe_log(cfg, a, "action (queued)", 0);
+        }
+    }
+}
+
+void action_keys_process_pending(const action_keys_config_t *cfg,
+                                 action_binding_t bindings[ACTION_MAX],
+                                 action_state_t *state,
+                                 const struct timespec *now)
+{
+    if (state->pending_idx < 0) {
+        return;
+    }
+    if (state->pending_idx >= ACTION_MAX || (size_t)state->pending_idx >= cfg->action_count) {
+        state->pending_idx = -1;
+        return;
+    }
+
+    int64_t diff = timespec_diff_ms_local(&state->last_dispatch, now);
+    if (diff >= ACTION_DEBOUNCE_MS) {
+        int rc = dispatch(&bindings[state->pending_idx]);
+        maybe_log(cfg, &cfg->actions[state->pending_idx], "action (pending)", rc);
+        state->last_dispatch = *now;
+        state->pending_idx = -1;
     }
 }
 
