@@ -332,8 +332,11 @@ static int send_http(action_binding_t *b)
         return -1;
     }
 
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    struct addrinfo *ai_connected = NULL;
     int fd = -1;
-    int restore_flags = -1;
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) {
@@ -342,16 +345,8 @@ static int send_http(action_binding_t *b)
 
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags >= 0 && !(flags & O_NONBLOCK)) {
-            if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0) {
-                restore_flags = flags;
-            }
+            fcntl(fd, F_SETFL, flags | O_NONBLOCK);
         }
-
-        struct timeval tv;
-        tv.tv_sec = b->spec.timeout_ms / 1000;
-        tv.tv_usec = (b->spec.timeout_ms % 1000) * 1000;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
         int rc_conn = connect(fd, ai->ai_addr, ai->ai_addrlen);
         if (rc_conn < 0 && errno == EINPROGRESS) {
@@ -377,16 +372,12 @@ static int send_http(action_binding_t *b)
             }
         }
 
-        if (rc_conn == 0 && restore_flags >= 0) {
-            fcntl(fd, F_SETFL, restore_flags);
-        }
-
         if (rc_conn == 0) {
+            ai_connected = ai;
             break;
         }
         close(fd);
         fd = -1;
-        restore_flags = -1;
     }
     freeaddrinfo(res);
     if (fd < 0) {
@@ -443,7 +434,33 @@ static int send_http(action_binding_t *b)
     req[off++] = '\r';
     req[off++] = '\n';
 
+    int send_timeout = b->spec.timeout_ms;
+    if (ai_connected && ai_connected->ai_next) {
+        /* If we iterated, subtract the elapsed time from the original timeout. */
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t elapsed = timespec_diff_ms(&start, &now);
+        if (elapsed > 0 && elapsed < b->spec.timeout_ms) {
+            send_timeout = (int)(b->spec.timeout_ms - elapsed);
+        } else if (elapsed >= b->spec.timeout_ms) {
+            send_timeout = 0;
+        }
+    }
+
+    struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+    int poll_rc = poll(&pfd, 1, send_timeout);
+    if (poll_rc <= 0 || !(pfd.revents & (POLLOUT | POLLERR | POLLHUP))) {
+        close(fd);
+        free(host);
+        free(port);
+        free(path);
+        return -1;
+    }
+
     ssize_t n = send(fd, req, off, MSG_NOSIGNAL);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        n = 0;
+    }
     if (n < 0) {
         close(fd);
         free(host);
@@ -451,20 +468,56 @@ static int send_http(action_binding_t *b)
         free(path);
         return -1;
     }
-    if (b->spec.method == ACTION_HTTP_POST && b->spec.body_len > 0) {
-        ssize_t nb = send(fd, b->spec.body, b->spec.body_len, MSG_NOSIGNAL);
-        if (nb < 0) {
+    size_t sent = (size_t)n;
+    while (sent < off) {
+        poll_rc = poll(&pfd, 1, send_timeout);
+        if (poll_rc <= 0 || !(pfd.revents & POLLOUT)) {
             close(fd);
             free(host);
             free(port);
             free(path);
             return -1;
         }
+        n = send(fd, req + sent, off - sent, MSG_NOSIGNAL);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        }
+        if (n < 0) {
+            close(fd);
+            free(host);
+            free(port);
+            free(path);
+            return -1;
+        }
+        sent += (size_t)n;
     }
 
-    char discard[512];
-    while (recv(fd, discard, sizeof(discard), 0) > 0) {
+    if (b->spec.method == ACTION_HTTP_POST && b->spec.body_len > 0) {
+        sent = 0;
+        while (sent < b->spec.body_len) {
+            poll_rc = poll(&pfd, 1, send_timeout);
+            if (poll_rc <= 0 || !(pfd.revents & POLLOUT)) {
+                close(fd);
+                free(host);
+                free(port);
+                free(path);
+                return -1;
+            }
+            n = send(fd, b->spec.body + sent, b->spec.body_len - sent, MSG_NOSIGNAL);
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                continue;
+            }
+            if (n < 0) {
+                close(fd);
+                free(host);
+                free(port);
+                free(path);
+                return -1;
+            }
+            sent += (size_t)n;
+        }
     }
+
     close(fd);
     free(host);
     free(port);
