@@ -79,6 +79,8 @@
 #define KEY_TRIGGER_NEG_HIGH (CRSF_MIN + (CRSF_MAX - KEY_TRIGGER_HIGH))
 #define KEY_TRIGGER_NEG_LOW  (CRSF_MIN + (CRSF_MAX - KEY_TRIGGER_LOW))
 #define KEY_LONG_DEFAULT_MS  700
+#define ACTION_QUEUE_MAX           32
+#define ACTION_DISPATCH_WARN_NS    3000000L
 
 _Static_assert(KEY_TRIGGER_LOW < KEY_TRIGGER_HIGH, "Key trigger low must be below high");
 _Static_assert(KEY_TRIGGER_HIGH <= CRSF_MAX && KEY_TRIGGER_LOW >= CRSF_MIN,
@@ -126,6 +128,21 @@ typedef struct {
     int watch_low[16];
     int enabled;
 } action_keys_runtime_t;
+
+typedef struct {
+    int channel;
+    action_edge_t edge;
+    action_press_t press;
+    struct timespec enqueued_at;
+} action_queue_item_t;
+
+typedef struct {
+    action_queue_item_t items[ACTION_QUEUE_MAX];
+    size_t head;
+    size_t tail;
+    size_t count;
+    uint64_t drops;
+} action_queue_t;
 
 /* ------------------------------------------------------------------------- */
 static volatile int g_run = 1;
@@ -1180,6 +1197,89 @@ static void action_keys_runtime_init(action_keys_runtime_t *ak)
     }
 }
 
+static void action_queue_init(action_queue_t *q)
+{
+    if (!q) {
+        return;
+    }
+    memset(q, 0, sizeof(*q));
+}
+
+static int action_queue_enqueue(action_queue_t *q, int channel,
+                                action_edge_t edge, action_press_t press,
+                                const struct timespec *now)
+{
+    if (!q) {
+        return -1;
+    }
+    if (q->count >= ACTION_QUEUE_MAX) {
+        q->drops++;
+        fprintf(stderr,
+                "Action queue full (%zu entries); dropping ch %d edge %d press %d\n",
+                q->count, channel, edge, press);
+        return -1;
+    }
+
+    size_t idx = q->tail;
+    q->items[idx].channel = channel;
+    q->items[idx].edge = edge;
+    q->items[idx].press = press;
+    if (now) {
+        q->items[idx].enqueued_at = *now;
+    } else {
+        q->items[idx].enqueued_at.tv_sec = 0;
+        q->items[idx].enqueued_at.tv_nsec = 0;
+    }
+
+    q->tail = (idx + 1U) % ACTION_QUEUE_MAX;
+    q->count++;
+    return 0;
+}
+
+static int action_queue_pop(action_queue_t *q, action_queue_item_t *out)
+{
+    if (!q || !out || q->count == 0) {
+        return -1;
+    }
+    size_t idx = q->head;
+    *out = q->items[idx];
+    q->head = (idx + 1U) % ACTION_QUEUE_MAX;
+    q->count--;
+    return 0;
+}
+
+static void action_queue_process(action_queue_t *q,
+                                 const action_keys_config_t *cfg,
+                                 action_binding_t bindings[ACTION_MAX],
+                                 long warn_threshold_ns)
+{
+    if (!q || !cfg || !bindings) {
+        return;
+    }
+
+    action_queue_item_t item;
+    while (q->count > 0) {
+        if (action_queue_pop(q, &item) < 0) {
+            break;
+        }
+
+        struct timespec dispatch_start;
+        struct timespec dispatch_end;
+        clock_gettime(CLOCK_MONOTONIC, &dispatch_start);
+        action_keys_handle_press(cfg, bindings,
+                                 item.channel, item.edge, item.press);
+        clock_gettime(CLOCK_MONOTONIC, &dispatch_end);
+
+        int64_t dispatch_ns = timespec_diff_ns(&dispatch_start, &dispatch_end);
+        if (dispatch_ns > warn_threshold_ns) {
+            double dispatch_ms = (double)dispatch_ns / 1e6;
+            fprintf(stderr,
+                    "Action dispatch ch %d edge %d press %d took %.3f ms\n",
+                    item.channel, item.edge, item.press, dispatch_ms);
+        }
+    }
+}
+
 static void action_keys_runtime_reload(action_keys_runtime_t *ak,
                                        const char *path,
                                        int warn_missing)
@@ -1268,6 +1368,8 @@ int main(int argc, char **argv)
 
         action_keys_runtime_t action_keys;
         action_keys_runtime_init(&action_keys);
+        action_queue_t action_queue;
+        action_queue_init(&action_queue);
         int action_conf_readable = (access(conf_path, R_OK) == 0);
         action_keys_runtime_reload(&action_keys, conf_path,
                                    !action_conf_readable && !action_keys_warned_missing);
@@ -1690,8 +1792,8 @@ int main(int argc, char **argv)
                             int64_t held = timespec_diff_ms(&key_press_start[i], &now);
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
-                            action_keys_handle_press(&action_keys.cfg, action_keys.bindings,
-                                                     i, ACTION_EDGE_HIGH, press);
+                            action_queue_enqueue(&action_queue, i,
+                                                 ACTION_EDGE_HIGH, press, &now);
                             key_press_active[i] = 0;
                         }
                     }
@@ -1706,8 +1808,8 @@ int main(int argc, char **argv)
                             int64_t held = timespec_diff_ms(&key_press_low_start[i], &now);
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
-                            action_keys_handle_press(&action_keys.cfg, action_keys.bindings,
-                                                     i, ACTION_EDGE_LOW, press);
+                            action_queue_enqueue(&action_queue, i,
+                                                 ACTION_EDGE_LOW, press, &now);
                             key_press_low_active[i] = 0;
                         }
                     }
@@ -1766,6 +1868,12 @@ int main(int argc, char **argv)
                         udp_packets++;
                     }
                 }
+            }
+
+            if (action_keys.enabled && action_queue.count > 0) {
+                action_queue_process(&action_queue, &action_keys.cfg,
+                                     action_keys.bindings,
+                                     ACTION_DISPATCH_WARN_NS);
             }
 
             if (cfg.stats) {
