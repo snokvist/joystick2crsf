@@ -1428,12 +1428,18 @@ int main(int argc, char **argv)
             int have_event = 0;
             if (SDL_WaitEventTimeout(&ev, wait_ms)) {
                 have_event = 1;
+                int events_processed = 0;
                 do {
                     if (ev.type == SDL_JOYDEVICEADDED ||
                         ev.type == SDL_JOYDEVICEREMOVED ||
                         ev.type == SDL_CONTROLLERDEVICEADDED ||
                         ev.type == SDL_CONTROLLERDEVICEREMOVED) {
                         next_rescan = now;
+                    }
+                    events_processed++;
+                    if (events_processed >= 100) {
+                        fprintf(stderr, "Warning: Event queue overflow, capped at 100 events.\n");
+                        break;
                     }
                 } while (SDL_PollEvent(&ev));
             }
