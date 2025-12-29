@@ -16,6 +16,8 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <time.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -106,6 +108,36 @@ static int parse_host_port(const char *spec, char **host_out, char **port_out)
     return 0;
 }
 
+static int resolve_ip_address(const char *host, const char *port_str,
+                              struct sockaddr_storage *addr, socklen_t *addrlen,
+                              int *family)
+{
+    memset(addr, 0, sizeof(*addr));
+    struct sockaddr_in *s4 = (struct sockaddr_in *)addr;
+    struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)addr;
+    int port = atoi(port_str);
+
+    // Try IPv4
+    if (inet_pton(AF_INET, host, &s4->sin_addr) == 1) {
+        s4->sin_family = AF_INET;
+        s4->sin_port = htons(port);
+        *addrlen = sizeof(struct sockaddr_in);
+        if (family) *family = AF_INET;
+        return 0;
+    }
+
+    // Try IPv6
+    if (inet_pton(AF_INET6, host, &s6->sin6_addr) == 1) {
+        s6->sin6_family = AF_INET6;
+        s6->sin6_port = htons(port);
+        *addrlen = sizeof(struct sockaddr_in6);
+        if (family) *family = AF_INET6;
+        return 0;
+    }
+
+    return -1;
+}
+
 static int open_udp_target(const char *target, struct sockaddr_storage *addr, socklen_t *addrlen)
 {
     char *host = NULL;
@@ -115,30 +147,17 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
         return -1;
     }
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_DGRAM;
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host, port, &hints, &res);
-    free(host);
-    free(port);
-    if (rc != 0) {
-        fprintf(stderr, "UDP getaddrinfo: %s\n", gai_strerror(rc));
+    int family = AF_INET;
+    if (resolve_ip_address(host, port, addr, addrlen, &family) < 0) {
+        fprintf(stderr, "Invalid IP address '%s'\n", host);
+        free(host);
+        free(port);
         return -1;
     }
+    free(host);
+    free(port);
 
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd >= 0) {
-            memcpy(addr, ai->ai_addr, ai->ai_addrlen);
-            *addrlen = (socklen_t)ai->ai_addrlen;
-            break;
-        }
-    }
-    freeaddrinfo(res);
+    int fd = socket(family, SOCK_DGRAM, 0);
     if (fd < 0) {
         perror("udp socket");
     } else {
@@ -248,9 +267,9 @@ static int parse_http_url(const char *url, char **host_out, char **port_out, cha
     return 0;
 }
 
-static int send_http(action_worker_t *worker, int index, const action_spec_t *spec)
+static int send_http(const action_spec_t *spec)
 {
-    if (!spec || !worker) {
+    if (!spec) {
         return -1;
     }
     char *host = NULL;
@@ -261,70 +280,33 @@ static int send_http(action_worker_t *worker, int index, const action_spec_t *sp
     }
 
     int fd = -1;
-    struct timeval tv;
-    tv.tv_sec = spec->timeout_ms / 1000;
-    tv.tv_usec = (spec->timeout_ms % 1000) * 1000;
+    struct sockaddr_storage addr;
+    socklen_t addrlen = 0;
+    int family = AF_INET;
 
-    /* Try cached address first */
-    if (index >= 0 && index < ACTION_MAX && worker->socket_addr_lens[index] > 0) {
-        fd = socket(worker->socket_addrs[index].ss_family, SOCK_STREAM, 0);
-        if (fd >= 0) {
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            if (connect(fd, (struct sockaddr *)&worker->socket_addrs[index],
-                        worker->socket_addr_lens[index]) == 0) {
-                /* Connected using cache */
-            } else {
-                close(fd);
-                fd = -1;
-                /* Cache invalid or unreachable, force re-resolve */
-                worker->socket_addr_lens[index] = 0;
-            }
-        }
+    if (resolve_ip_address(host, port, &addr, &addrlen, &family) == 0) {
+        fd = socket(family, SOCK_STREAM, 0);
     }
 
     if (fd < 0) {
-        struct addrinfo hints;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-        struct addrinfo *res = NULL;
-        int rc = getaddrinfo(host, port, &hints, &res);
-        if (rc != 0 || !res) {
-            free(host);
-            free(port);
-            free(path);
-            if (res) {
-                freeaddrinfo(res);
-            }
-            return -1;
-        }
+        free(host);
+        free(port);
+        free(path);
+        return -1;
+    }
 
-        for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-            fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-            if (fd < 0) {
-                continue;
-            }
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-                /* Cache the successful address */
-                if (index >= 0 && index < ACTION_MAX) {
-                    memcpy(&worker->socket_addrs[index], ai->ai_addr, ai->ai_addrlen);
-                    worker->socket_addr_lens[index] = (socklen_t)ai->ai_addrlen;
-                }
-                break;
-            }
-            close(fd);
-            fd = -1;
-        }
-        freeaddrinfo(res);
-        if (fd < 0) {
-            free(host);
-            free(port);
-            free(path);
-            return -1;
-        }
+    struct timeval tv;
+    tv.tv_sec = spec->timeout_ms / 1000;
+    tv.tv_usec = (spec->timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (connect(fd, (struct sockaddr *)&addr, addrlen) != 0) {
+        close(fd);
+        free(host);
+        free(port);
+        free(path);
+        return -1;
     }
 
     char req[2048];
@@ -464,7 +446,7 @@ static void *action_worker_thread(void *arg)
             if (item.spec.transport == ACTION_TRANSPORT_UDP) {
                 rc = send_udp(w, item.index, &item.spec);
             } else {
-                rc = send_http(w, item.index, &item.spec);
+                rc = send_http(&item.spec);
             }
             if (rc != 0) {
                 /* Log failure if needed, but we don't have access to cfg here easily.
