@@ -248,9 +248,9 @@ static int parse_http_url(const char *url, char **host_out, char **port_out, cha
     return 0;
 }
 
-static int send_http(const action_spec_t *spec)
+static int send_http(action_worker_t *worker, int index, const action_spec_t *spec)
 {
-    if (!spec) {
+    if (!spec || !worker) {
         return -1;
     }
     char *host = NULL;
@@ -260,45 +260,71 @@ static int send_http(const action_spec_t *spec)
         return -1;
     }
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host, port, &hints, &res);
-    if (rc != 0 || !res) {
-        free(host);
-        free(port);
-        free(path);
-        if (res) {
-            freeaddrinfo(res);
+    int fd = -1;
+    struct timeval tv;
+    tv.tv_sec = spec->timeout_ms / 1000;
+    tv.tv_usec = (spec->timeout_ms % 1000) * 1000;
+
+    /* Try cached address first */
+    if (index >= 0 && index < ACTION_MAX && worker->socket_addr_lens[index] > 0) {
+        fd = socket(worker->socket_addrs[index].ss_family, SOCK_STREAM, 0);
+        if (fd >= 0) {
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            if (connect(fd, (struct sockaddr *)&worker->socket_addrs[index],
+                        worker->socket_addr_lens[index]) == 0) {
+                /* Connected using cache */
+            } else {
+                close(fd);
+                fd = -1;
+                /* Cache invalid or unreachable, force re-resolve */
+                worker->socket_addr_lens[index] = 0;
+            }
         }
-        return -1;
     }
 
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) {
-            continue;
-        }
-        struct timeval tv;
-        tv.tv_sec = spec->timeout_ms / 1000;
-        tv.tv_usec = (spec->timeout_ms % 1000) * 1000;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-            break;
-        }
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
     if (fd < 0) {
-        free(host);
-        free(port);
-        free(path);
-        return -1;
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        struct addrinfo *res = NULL;
+        int rc = getaddrinfo(host, port, &hints, &res);
+        if (rc != 0 || !res) {
+            free(host);
+            free(port);
+            free(path);
+            if (res) {
+                freeaddrinfo(res);
+            }
+            return -1;
+        }
+
+        for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+            fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd < 0) {
+                continue;
+            }
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+                /* Cache the successful address */
+                if (index >= 0 && index < ACTION_MAX) {
+                    memcpy(&worker->socket_addrs[index], ai->ai_addr, ai->ai_addrlen);
+                    worker->socket_addr_lens[index] = (socklen_t)ai->ai_addrlen;
+                }
+                break;
+            }
+            close(fd);
+            fd = -1;
+        }
+        freeaddrinfo(res);
+        if (fd < 0) {
+            free(host);
+            free(port);
+            free(path);
+            return -1;
+        }
     }
 
     char req[2048];
@@ -438,7 +464,7 @@ static void *action_worker_thread(void *arg)
             if (item.spec.transport == ACTION_TRANSPORT_UDP) {
                 rc = send_udp(w, item.index, &item.spec);
             } else {
-                rc = send_http(&item.spec);
+                rc = send_http(w, item.index, &item.spec);
             }
             if (rc != 0) {
                 /* Log failure if needed, but we don't have access to cfg here easily.
