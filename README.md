@@ -1,8 +1,9 @@
 # Joystick2crsf
 
-Joystick2crsf is a small SDL2 utility that maps joystick inputs to Crossfire (CRSF) channels and
-streams them over UDP. It can also publish telemetry as a server-sent events stream and expose RC
-channels through MAVLink when configured.
+Joystick2crsf is a small Linux joystick utility that maps joystick inputs to Crossfire (CRSF)
+channels and streams them over UDP. It can also publish telemetry as a server-sent events stream
+and expose RC channels through MAVLink when configured.
+The tool reads `/dev/input/jsN` devices directly, so no SDL runtime is required.
 
 <img
   width="1920"
@@ -22,14 +23,14 @@ channels through MAVLink when configured.
 
 ## Building
 
-The project depends on SDL2 headers, libcurl (for `action_keys`), and `pkg-config`. To build on a
-development machine:
+The project depends on libcurl (for `action_keys`) and `pkg-config`. To build on a development
+machine:
 
 ```sh
 set -euxo pipefail
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-  build-essential pkg-config libsdl2-dev libcurl4-openssl-dev
+  build-essential pkg-config libcurl4-openssl-dev
 make
 ```
 
@@ -61,8 +62,7 @@ checkout. In your package `.mk` file, call the build and install targets with Bu
 `TARGET_MAKE_ENV`:
 
 ```make
-JOYSTICK2CRSF_DEPENDENCIES = sdl2
-
+JOYSTICK2CRSF_DEPENDENCIES = libcurl
 define JOYSTICK2CRSF_BUILD_CMDS
 $(TARGET_MAKE_ENV) $(MAKE) -C $(@D)
 endef
@@ -81,6 +81,14 @@ use CRSF scaling where 1811 is max and 172 is min. High-edge presses arm at 1700
 1500, leaving a 200-count hysteresis. Low-edge presses mirror that around the CRSF minimum: they
 trigger at 283 (1811 symmetrical to 1700) and release at 483, keeping the same gap to avoid
 chattering while the stick settles.
+
+## Input mapping
+
+- Axis 0/1 drive channels 1/2 (Y is inverted to match radio mode 2 defaults).
+- Axis 2/3 drive channels 3/4 (Y inverted).
+- Axis 4/5 drive channels 5/6 for auxiliary controls.
+- The D-pad comes from axes 6/7 when present; otherwise buttons 12–15 provide the hat.
+- Buttons 1–8 feed channels 9–16 at full-scale CRSF values.
 
 ## Action keys configuration
 

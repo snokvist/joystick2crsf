@@ -1,11 +1,10 @@
 /**
- * joystick2crsf.c - SDL joystick to CRSF bridge with UDP/SSE outputs
+ * joystick2crsf.c - Linux joystick to CRSF bridge with UDP/SSE outputs
  *
  * The utility samples the selected joystick at a configurable rate (25–500 Hz),
- * maps its controls to 16 CRSF channels, and streams the packed frames to a
- * UDP peer. Runtime
- * behaviour is configured exclusively via a config
- * file (default: /etc/joystick2crsf.conf).
+ * maps its controls to 16 CRSF channels, and streams the packed frames to a UDP
+ * peer. Runtime behaviour is configured exclusively via a config file
+ * (default: /etc/joystick2crsf.conf).
 
  * autod – Autod Personal Use License
  * Copyright (c) 2025 Joakim Snökvist
@@ -16,14 +15,15 @@
 
 #define _POSIX_C_SOURCE 200809L
 #define _GNU_SOURCE
-#include <SDL2/SDL.h>
 
 #include "action_keys.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/joystick.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdint.h>
@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
@@ -115,7 +116,6 @@ typedef struct {
     int joystick_index;
     int rescan_interval;        /* seconds */
     int startup_delay;          /* seconds */
-    int use_gamecontroller;
     int key_long_threshold_ms;
     int scheduler_prio;         /* SCHED_FIFO priority, or <= 0 for non-RT */
 } config_t;
@@ -128,6 +128,20 @@ typedef struct {
     int watch_low[16];
     int enabled;
 } action_keys_runtime_t;
+
+#define MAX_JS_AXES    32
+#define MAX_JS_BUTTONS 32
+
+typedef struct {
+    int fd;
+    int index;
+    int axes;
+    int buttons;
+    char path[64];
+    char name[128];
+    int16_t axis[MAX_JS_AXES];
+    uint8_t button[MAX_JS_BUTTONS];
+} joystick_device_t;
 
 /* ------------------------------------------------------------------------- */
 static volatile int g_run = 1;
@@ -684,52 +698,53 @@ static inline int32_t clip_dead(int32_t v, int thr)
     return v;
 }
 
-static inline int32_t normalize_trigger_axis(int32_t v)
+static int16_t joystick_axis(const joystick_device_t *js, int idx)
 {
-    if (v >= 0) {
-        int32_t scaled = (v * 2) - 32768;
-        if (scaled < -32768) {
-            scaled = -32768;
-        } else if (scaled > 32767) {
-            scaled = 32767;
-        }
-        return scaled;
+    if (!js || js->fd < 0 || idx < 0 || idx >= js->axes || idx >= MAX_JS_AXES) {
+        return 0;
     }
-    return v;
+    return js->axis[idx];
 }
 
-static void build_channels_joystick(SDL_Joystick *js, const int dead[16],
-                                    uint16_t ch_s[16], int32_t ch_r[16],
-                                    int hat_count, int axis_count, int button_count)
+static int joystick_button(const joystick_device_t *js, int idx)
 {
-    ch_r[0] = SDL_JoystickGetAxis(js, 0);
-    ch_r[1] = SDL_JoystickGetAxis(js, 1);
-    ch_r[2] = SDL_JoystickGetAxis(js, 2);
-    ch_r[3] = SDL_JoystickGetAxis(js, 5);
-    for (int i = 0; i < 4; i++) {
-        ch_r[i] = clip_dead(ch_r[i], dead[i]);
+    if (!js || js->fd < 0 || idx < 0 || idx >= js->buttons || idx >= MAX_JS_BUTTONS) {
+        return 0;
     }
+    return js->button[idx] ? 1 : 0;
+}
+
+static void build_channels(const joystick_device_t *js,
+                           const int dead[16], uint16_t ch_s[16], int32_t ch_r[16])
+{
+    if (!js || js->fd < 0) {
+        memset(ch_s, 0, sizeof(uint16_t) * 16);
+        memset(ch_r, 0, sizeof(int32_t) * 16);
+        return;
+    }
+
+    ch_r[0] = clip_dead(joystick_axis(js, 0), dead[0]);
+    ch_r[1] = clip_dead(joystick_axis(js, 1), dead[1]);
+    ch_r[2] = clip_dead(joystick_axis(js, 2), dead[2]);
+    ch_r[3] = clip_dead(joystick_axis(js, 3), dead[3]);
+    ch_r[4] = clip_dead(joystick_axis(js, 4), dead[4]);
+    ch_r[5] = clip_dead(joystick_axis(js, 5), dead[5]);
+
     ch_s[0] = scale_axis(ch_r[0]);
     ch_s[1] = scale_axis(-ch_r[1]);
     ch_s[2] = scale_axis(ch_r[2]);
     ch_s[3] = scale_axis(-ch_r[3]);
-
-    ch_r[4] = clip_dead(SDL_JoystickGetAxis(js, 3), dead[4]);
-    ch_r[5] = clip_dead(SDL_JoystickGetAxis(js, 4), dead[5]);
     ch_s[4] = scale_axis(ch_r[4]);
     ch_s[5] = scale_axis(ch_r[5]);
 
-    int dpx = 0, dpy = 0;
-    if (hat_count > 0) {
-        uint8_t h = SDL_JoystickGetHat(js, 0);
-        dpx = (h & SDL_HAT_RIGHT) ? 1 : (h & SDL_HAT_LEFT) ? -1 : 0;
-        dpy = (h & SDL_HAT_UP) ? 1 : (h & SDL_HAT_DOWN) ? -1 : 0;
-    } else if (axis_count >= 8) {
-        dpx = SDL_JoystickGetAxis(js, 6) / 32767;
-        dpy = -SDL_JoystickGetAxis(js, 7) / 32767;
-    } else if (button_count >= 15) {
-        dpy = SDL_JoystickGetButton(js, 11) ? 1 : SDL_JoystickGetButton(js, 12) ? -1 : 0;
-        dpx = SDL_JoystickGetButton(js, 13) ? -1 : SDL_JoystickGetButton(js, 14) ? 1 : 0;
+    int dpx = 0;
+    int dpy = 0;
+    if (js->axes >= 8) {
+        dpx = joystick_axis(js, 6) / 32767;
+        dpy = -joystick_axis(js, 7) / 32767;
+    } else if (js->buttons >= 15) {
+        dpy = joystick_button(js, 11) ? 1 : joystick_button(js, 12) ? -1 : 0;
+        dpx = joystick_button(js, 13) ? -1 : joystick_button(js, 14) ? 1 : 0;
     }
     int32_t dpx_axis = dpx * 32767;
     int32_t dpy_axis = dpy * 32767;
@@ -739,100 +754,105 @@ static void build_channels_joystick(SDL_Joystick *js, const int dead[16],
     ch_s[7] = scale_axis(dpy_axis);
 
     for (int i = 8; i < 16; i++) {
-        int b = SDL_JoystickGetButton(js, i - 8);
+        int b = joystick_button(js, i - 8);
         ch_r[i] = b;
         ch_s[i] = scale_bool(b);
     }
 }
 
-static void build_channels_gamecontroller(SDL_GameController *gc,
-                                          SDL_Joystick *js,
-                                          const int dead[16],
-                                          uint16_t ch_s[16], int32_t ch_r[16],
-                                          int hat_count, int axis_count, int button_count)
+static void joystick_reset(joystick_device_t *js)
 {
-    int32_t left_x = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
-    int32_t left_y = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
-    int32_t right_x = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX);
-    int32_t right_y = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY);
-
-    ch_r[0] = clip_dead(left_x, dead[0]);
-    ch_r[1] = clip_dead(left_y, dead[1]);
-    ch_r[2] = clip_dead(right_x, dead[2]);
-    ch_r[3] = clip_dead(right_y, dead[3]);
-
-    ch_s[0] = scale_axis(ch_r[0]);
-    ch_s[1] = scale_axis(-ch_r[1]);
-    ch_s[2] = scale_axis(ch_r[2]);
-    ch_s[3] = scale_axis(-ch_r[3]);
-
-    int32_t trigger_left = normalize_trigger_axis(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT));
-    int32_t trigger_right = normalize_trigger_axis(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
-
-    ch_r[4] = clip_dead(trigger_left, dead[4]);
-    ch_r[5] = clip_dead(trigger_right, dead[5]);
-    ch_s[4] = scale_axis(ch_r[4]);
-    ch_s[5] = scale_axis(ch_r[5]);
-
-    int dpx = 0, dpy = 0;
-    int up = SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_UP);
-    int down = SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-    int left = SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-    int right = SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-    if (up || down || left || right) {
-        dpy = up ? 1 : down ? -1 : 0;
-        dpx = left ? -1 : right ? 1 : 0;
-    } else if (js && hat_count > 0) {
-        uint8_t h = SDL_JoystickGetHat(js, 0);
-        dpx = (h & SDL_HAT_RIGHT) ? 1 : (h & SDL_HAT_LEFT) ? -1 : 0;
-        dpy = (h & SDL_HAT_UP) ? 1 : (h & SDL_HAT_DOWN) ? -1 : 0;
-    } else if (js && axis_count >= 8) {
-        dpx = SDL_JoystickGetAxis(js, 6) / 32767;
-        dpy = -SDL_JoystickGetAxis(js, 7) / 32767;
-    } else if (js && button_count >= 15) {
-        dpy = SDL_JoystickGetButton(js, 11) ? 1 : SDL_JoystickGetButton(js, 12) ? -1 : 0;
-        dpx = SDL_JoystickGetButton(js, 13) ? -1 : SDL_JoystickGetButton(js, 14) ? 1 : 0;
+    if (!js) {
+        return;
     }
-
-    int32_t dpx_axis = dpx * 32767;
-    int32_t dpy_axis = dpy * 32767;
-    ch_r[6] = dpx_axis;
-    ch_r[7] = dpy_axis;
-    ch_s[6] = scale_axis(dpx_axis);
-    ch_s[7] = scale_axis(dpy_axis);
-
-    static const SDL_GameControllerButton button_order[8] = {
-        SDL_CONTROLLER_BUTTON_A,
-        SDL_CONTROLLER_BUTTON_B,
-        SDL_CONTROLLER_BUTTON_X,
-        SDL_CONTROLLER_BUTTON_Y,
-        SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
-        SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
-        SDL_CONTROLLER_BUTTON_BACK,
-        SDL_CONTROLLER_BUTTON_START
-    };
-    for (int i = 0; i < 8; i++) {
-        int pressed = SDL_GameControllerGetButton(gc, button_order[i]) ? 1 : 0;
-        if (!pressed && js && i < button_count) {
-            pressed = SDL_JoystickGetButton(js, i);
-        }
-        ch_r[8 + i] = pressed;
-        ch_s[8 + i] = scale_bool(pressed);
-    }
+    memset(js, 0, sizeof(*js));
+    js->fd = -1;
+    js->index = -1;
 }
 
-static void build_channels(SDL_GameController *gc, SDL_Joystick *js,
-                           const int dead[16], uint16_t ch_s[16], int32_t ch_r[16],
-                           int hat_count, int axis_count, int button_count)
+static void joystick_close(joystick_device_t *js)
 {
-    if (gc) {
-        build_channels_gamecontroller(gc, js, dead, ch_s, ch_r, hat_count, axis_count, button_count);
-    } else if (js) {
-        build_channels_joystick(js, dead, ch_s, ch_r, hat_count, axis_count, button_count);
-    } else {
-        memset(ch_s, 0, sizeof(uint16_t) * 16);
-        memset(ch_r, 0, sizeof(int32_t) * 16);
+    if (!js || js->fd < 0) {
+        return;
     }
+    close(js->fd);
+    js->fd = -1;
+}
+
+static int joystick_open(joystick_device_t *js, int index)
+{
+    if (!js) {
+        return -1;
+    }
+    joystick_close(js);
+
+    snprintf(js->path, sizeof(js->path), "/dev/input/js%d", index);
+    int fd = open(js->path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        return -1;
+    }
+
+    __u8 axes = 0;
+    __u8 buttons = 0;
+    char name[sizeof(js->name)];
+    memset(name, 0, sizeof(name));
+
+    if (ioctl(fd, JSIOCGAXES, &axes) < 0) {
+        axes = 0;
+    }
+    if (ioctl(fd, JSIOCGBUTTONS, &buttons) < 0) {
+        buttons = 0;
+    }
+    if (ioctl(fd, JSIOCGNAME(sizeof(name)), name) < 0) {
+        snprintf(name, sizeof(name), "js%d", index);
+    }
+
+    js->fd = fd;
+    js->index = index;
+    js->axes = (axes > MAX_JS_AXES) ? MAX_JS_AXES : (int)axes;
+    js->buttons = (buttons > MAX_JS_BUTTONS) ? MAX_JS_BUTTONS : (int)buttons;
+    snprintf(js->name, sizeof(js->name), "%s", name);
+    memset(js->axis, 0, sizeof(js->axis));
+    memset(js->button, 0, sizeof(js->button));
+    fprintf(stderr, "Joystick %d connected (%d axes, %d buttons): %s\n",
+            index, js->axes, js->buttons, js->name);
+    return 0;
+}
+
+static int joystick_poll_events(joystick_device_t *js)
+{
+    if (!js || js->fd < 0) {
+        return -1;
+    }
+
+    struct js_event ev;
+    int updates = 0;
+    while (1) {
+        ssize_t n = read(js->fd, &ev, sizeof(ev));
+        if (n == (ssize_t)sizeof(ev)) {
+            ev.type &= ~JS_EVENT_INIT;
+            if (ev.type == JS_EVENT_AXIS) {
+                if (ev.number < MAX_JS_AXES) {
+                    js->axis[ev.number] = ev.value;
+                    updates++;
+                }
+            } else if (ev.type == JS_EVENT_BUTTON) {
+                if (ev.number < MAX_JS_BUTTONS) {
+                    js->button[ev.number] = (ev.value != 0);
+                    updates++;
+                }
+            }
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            break;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        return -1;
+    }
+    return updates;
 }
 
 /* --------------------------- Config helpers -------------------------------- */
@@ -973,7 +993,6 @@ static void config_defaults(config_t *cfg)
     cfg->joystick_index = 0;
     cfg->rescan_interval = 5;
     cfg->startup_delay = 5;
-    cfg->use_gamecontroller = 1;
     cfg->key_long_threshold_ms = KEY_LONG_DEFAULT_MS;
     cfg->scheduler_prio = 50;
     for (int i = 0; i < 16; i++) {
@@ -1081,11 +1100,6 @@ static int config_load(config_t *cfg, const char *path)
             cfg->rescan_interval = atoi(val);
         } else if (!strcasecmp(key, "startup_delay")) {
             cfg->startup_delay = atoi(val);
-        } else if (!strcasecmp(key, "use_gamecontroller")) {
-            int b;
-            if (parse_bool_value(val, &b) == 0) {
-                cfg->use_gamecontroller = b;
-            }
         } else if (!strcasecmp(key, "key_long_threshold_ms")) {
             cfg->key_long_threshold_ms = atoi(val);
         } else if (!strcasecmp(key, "scheduler_prio")) {
@@ -1297,14 +1311,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) < 0) {
-        fprintf(stderr, "SDL: %s\n", SDL_GetError());
-        return 1;
-    }
-
     int exit_code = 0;
     int startup_delay_applied = 0;
     int action_keys_warned_missing = 0;
+    joystick_device_t js;
+    joystick_reset(&js);
 
     while (g_run) {
         config_t cfg;
@@ -1350,13 +1361,6 @@ int main(int argc, char **argv)
         int sse_client_fd = -1;
         struct sockaddr_storage udp_addr;
         socklen_t udp_addrlen = 0;
-        SDL_GameController *gc = NULL;
-        SDL_Joystick *js = NULL;
-        int js_owned = 0;
-        int js_axes = 0;
-        int js_hats = 0;
-        int js_buttons = 0;
-
         int fatal_error = 0;
         int restart_requested = 0;
         int restart_sleep = 0;
@@ -1390,14 +1394,7 @@ int main(int argc, char **argv)
         }
 
         if (fatal_error) {
-            if (gc) {
-                SDL_GameControllerClose(gc);
-                gc = NULL;
-            } else if (js && js_owned) {
-                SDL_JoystickClose(js);
-            }
-            js = NULL;
-            js_owned = 0;
+            joystick_close(&js);
             if (udp_fd >= 0) {
                 close(udp_fd);
             }
@@ -1470,13 +1467,14 @@ int main(int argc, char **argv)
         struct timespec key_press_low_start[16];
         reset_key_tracking(key_press_active, key_press_low_active,
                            key_press_start, key_press_low_start);
+        int missing_logged = 0;
 
         while (g_run && !restart_requested) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
 
             struct timespec deadline = next_frame;
-            if (!js && timespec_cmp(&next_rescan, &deadline) < 0) {
+            if (js.fd < 0 && timespec_cmp(&next_rescan, &deadline) < 0) {
                 deadline = next_rescan;
             }
             if (cfg.sse_enabled && sse_client_fd >= 0 &&
@@ -1484,34 +1482,27 @@ int main(int argc, char **argv)
                 deadline = next_sse_emit;
             }
 
-            int wait_ms = 0;
+            struct timespec timeout = {0, 0};
             if (timespec_cmp(&now, &deadline) < 0) {
                 int64_t wait_ns = timespec_diff_ns(&now, &deadline);
                 if (wait_ns > 0) {
-                    wait_ms = (int)(wait_ns / 1000000L);
+                    timeout.tv_sec = wait_ns / NS_PER_SEC;
+                    timeout.tv_nsec = wait_ns % NS_PER_SEC;
                 }
             }
 
-            struct timespec wait_start = now;
-            SDL_Event ev;
-            int have_event = 0;
-            if (SDL_WaitEventTimeout(&ev, wait_ms)) {
-                have_event = 1;
-                int events_processed = 0;
-                do {
-                    if (ev.type == SDL_JOYDEVICEADDED ||
-                        ev.type == SDL_JOYDEVICEREMOVED ||
-                        ev.type == SDL_CONTROLLERDEVICEADDED ||
-                        ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-                        next_rescan = now;
-                    }
-                    events_processed++;
-                    if (events_processed >= 2000) {
-                        fprintf(stderr, "Warning: Event queue overflow, capped at 2000 events.\n");
-                        break;
-                    }
-                } while (SDL_PollEvent(&ev));
+            struct pollfd pfds[1];
+            nfds_t nfds = 0;
+            if (js.fd >= 0) {
+                pfds[0].fd = js.fd;
+                pfds[0].events = POLLIN | POLLPRI;
+                pfds[0].revents = 0;
+                nfds = 1;
             }
+
+            struct timespec wait_start = now;
+            struct pollfd *pollfds = nfds ? pfds : NULL;
+            int poll_rc = ppoll(pollfds, nfds, &timeout, NULL);
 
             clock_gettime(CLOCK_MONOTONIC, &now);
 
@@ -1524,10 +1515,43 @@ int main(int argc, char **argv)
             }
             wait_sum += waited_s;
             wait_cnt++;
-            if (have_event) {
-                wake_events++;
-            } else {
-                wake_timeouts++;
+            wake_events += (poll_rc > 0);
+            wake_timeouts += (poll_rc == 0);
+
+            if (poll_rc < 0 && errno != EINTR) {
+                perror("poll");
+                g_run = 0;
+                break;
+            }
+            if (js.fd >= 0 && poll_rc > 0) {
+                if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                    fprintf(stderr, "Joystick %d detached\n", cfg.joystick_index);
+                    joystick_close(&js);
+                    arm_press_active = 0;
+                    arm_sticky = 0;
+                    reset_key_tracking(key_press_active, key_press_low_active,
+                                       key_press_start, key_press_low_start);
+                    next_rescan = timespec_add(now, 1, 0);
+                    missing_logged = 0;
+                    struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                    nanosleep(&delay, NULL);
+                    continue;
+                }
+                if (pfds[0].revents & (POLLIN | POLLPRI)) {
+                    if (joystick_poll_events(&js) < 0) {
+                        fprintf(stderr, "Joystick %d detached\n", cfg.joystick_index);
+                        joystick_close(&js);
+                        arm_press_active = 0;
+                        arm_sticky = 0;
+                        reset_key_tracking(key_press_active, key_press_low_active,
+                                           key_press_start, key_press_low_start);
+                        next_rescan = timespec_add(now, 1, 0);
+                        missing_logged = 0;
+                        struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
+                        nanosleep(&delay, NULL);
+                        continue;
+                    }
+                }
             }
 
             if (g_reload) {
@@ -1537,148 +1561,23 @@ int main(int argc, char **argv)
                 break;
             }
 
-            if (gc && !SDL_GameControllerGetAttached(gc)) {
-                fprintf(stderr, "Game controller %d detached\n", cfg.joystick_index);
-                SDL_GameControllerClose(gc);
-                gc = NULL;
-                js = NULL;
-                js_owned = 0;
-                js_axes = 0;
-                js_hats = 0;
-                js_buttons = 0;
-                arm_press_active = 0;
-                arm_sticky = 0;
-                reset_key_tracking(key_press_active, key_press_low_active,
-                                   key_press_start, key_press_low_start);
-                next_rescan = now;
-                struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
-                nanosleep(&delay, NULL);
-                continue;
-            }
-            if (!gc && js && !SDL_JoystickGetAttached(js)) {
-                fprintf(stderr, "Joystick %d detached\n", cfg.joystick_index);
-                if (js_owned) {
-                    SDL_JoystickClose(js);
+            if (js.fd < 0 && timespec_cmp(&now, &next_rescan) >= 0) {
+                if (joystick_open(&js, cfg.joystick_index) == 0) {
+                    missing_logged = 0;
+                } else if (!missing_logged) {
+                    fprintf(stderr, "Joystick %d not available; retrying discovery.\n",
+                            cfg.joystick_index);
+                    missing_logged = 1;
                 }
-                js = NULL;
-                js_owned = 0;
-                js_axes = 0;
-                js_hats = 0;
-                js_buttons = 0;
+                next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+            }
+
+            if (js.fd < 0) {
                 arm_press_active = 0;
                 arm_sticky = 0;
                 reset_key_tracking(key_press_active, key_press_low_active,
                                    key_press_start, key_press_low_start);
-                next_rescan = now;
-                struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
-                nanosleep(&delay, NULL);
-                continue;
-            }
-
-            if (!js && timespec_cmp(&now, &next_rescan) >= 0) {
-                int count = SDL_NumJoysticks();
-                if (cfg.joystick_index < count) {
-                    const char *name = NULL;
-                    int has_mapping = SDL_IsGameController(cfg.joystick_index);
-                    if (cfg.use_gamecontroller && has_mapping) {
-                        SDL_GameController *candidate = SDL_GameControllerOpen(cfg.joystick_index);
-                        if (candidate) {
-                            gc = candidate;
-                            js = SDL_GameControllerGetJoystick(gc);
-                            js_owned = 0;
-                            if (!js) {
-                                fprintf(stderr, "Game controller %d missing joystick backend\n",
-                                        cfg.joystick_index);
-                                SDL_GameControllerClose(gc);
-                                gc = NULL;
-                                arm_press_active = 0;
-                                arm_sticky = 0;
-                                reset_key_tracking(key_press_active, key_press_low_active,
-                                                   key_press_start, key_press_low_start);
-                                next_rescan = timespec_add(now, cfg.rescan_interval, 0);
-                                struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
-                                nanosleep(&delay, NULL);
-                                continue;
-                            }
-                            js_axes = SDL_JoystickNumAxes(js);
-                            js_hats = SDL_JoystickNumHats(js);
-                            js_buttons = SDL_JoystickNumButtons(js);
-                            name = SDL_GameControllerName(gc);
-                            if (!name) {
-                                name = SDL_JoystickName(js);
-                            }
-                            fprintf(stderr, "Game controller %d connected: %s\n",
-                                    cfg.joystick_index, name ? name : "unknown");
-                        } else {
-                            fprintf(stderr, "Failed to open game controller %d: %s\n",
-                                    cfg.joystick_index, SDL_GetError());
-                            arm_press_active = 0;
-                            arm_sticky = 0;
-                            reset_key_tracking(key_press_active, key_press_low_active,
-                                               key_press_start, key_press_low_start);
-                            next_rescan = timespec_add(now, cfg.rescan_interval, 0);
-                            struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
-                            nanosleep(&delay, NULL);
-                            continue;
-                        }
-                    } else {
-                        SDL_Joystick *candidate = SDL_JoystickOpen(cfg.joystick_index);
-                        if (candidate) {
-                            js = candidate;
-                            js_owned = 1;
-                            js_axes = SDL_JoystickNumAxes(js);
-                            js_hats = SDL_JoystickNumHats(js);
-                            js_buttons = SDL_JoystickNumButtons(js);
-                            name = SDL_JoystickName(js);
-                            const char *reason = NULL;
-                            if (!cfg.use_gamecontroller && has_mapping) {
-                                reason = "game controller mapping disabled";
-                            } else if (cfg.use_gamecontroller && !has_mapping) {
-                                reason = "no game controller mapping";
-                            }
-                            if (reason) {
-                                fprintf(stderr, "Joystick %d connected (%s): %s\n",
-                                        cfg.joystick_index, reason, name ? name : "unknown");
-                            } else {
-                                fprintf(stderr, "Joystick %d connected: %s\n",
-                                        cfg.joystick_index, name ? name : "unknown");
-                            }
-                        } else {
-                            fprintf(stderr, "Failed to open joystick %d: %s\n",
-                                    cfg.joystick_index, SDL_GetError());
-                            arm_press_active = 0;
-                            arm_sticky = 0;
-                            reset_key_tracking(key_press_active, key_press_low_active,
-                                               key_press_start, key_press_low_start);
-                            next_rescan = timespec_add(now, cfg.rescan_interval, 0);
-                            struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
-                            nanosleep(&delay, NULL);
-                            continue;
-                        }
-                    }
-                  } else {
-                      fprintf(stderr, "Joystick index %d unavailable (only %d detected)\n",
-                              cfg.joystick_index, count);
-                      arm_press_active = 0;
-                      arm_sticky = 0;
-                      reset_key_tracking(key_press_active, key_press_low_active,
-                                         key_press_start, key_press_low_start);
-                      next_rescan = timespec_add(now, cfg.rescan_interval, 0);
-                      struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
-                      nanosleep(&delay, NULL);
-                      continue;
-                  }
-                next_rescan = timespec_add(now, cfg.rescan_interval, 0);
-            }
-
-            if (!js) {
-                fprintf(stderr, "Joystick %d not available; retrying discovery.\n",
-                        cfg.joystick_index);
-                arm_press_active = 0;
-                arm_sticky = 0;
-                reset_key_tracking(key_press_active, key_press_low_active,
-                                   key_press_start, key_press_low_start);
-                next_rescan = timespec_add(now, cfg.rescan_interval, 0);
+                next_frame = timespec_add(now, 0, frame_interval_ns);
                 struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
                 nanosleep(&delay, NULL);
                 continue;
@@ -1686,8 +1585,7 @@ int main(int argc, char **argv)
 
             uint16_t ch_source[16];
             int32_t raw_source[16];
-            build_channels(gc, js, cfg.dead, ch_source, raw_source,
-                           js_hats, js_axes, js_buttons);
+            build_channels(&js, cfg.dead, ch_source, raw_source);
 
             uint16_t ch_out[16];
             int32_t raw_out[16];
@@ -1890,18 +1788,7 @@ int main(int argc, char **argv)
             }
         }
 
-        if (gc) {
-            SDL_GameControllerClose(gc);
-            gc = NULL;
-            js = NULL;
-            js_owned = 0;
-        } else if (js) {
-            if (js_owned) {
-                SDL_JoystickClose(js);
-            }
-            js = NULL;
-            js_owned = 0;
-        }
+        joystick_close(&js);
         if (udp_fd >= 0) {
             close(udp_fd);
             udp_fd = -1;
@@ -1929,6 +1816,5 @@ int main(int argc, char **argv)
         }
     }
 
-    SDL_Quit();
     return exit_code;
 }

@@ -12,14 +12,12 @@ JOYSTICK2CRSF_BIN ?= $(BINDIR)/$(TARGET)
 JOYSTICK2CRSF_CONF ?= $(CONFDIR)/joystick2crsf.conf
 
 PKG_CONFIG ?= pkg-config
-SDL2_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags sdl2)
-SDL2_LIBS ?= $(shell $(PKG_CONFIG) --libs sdl2)
-CURL_CFLAGS ?=
-CURL_LIBS ?=
+CURL_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libcurl)
+CURL_LIBS ?= $(shell $(PKG_CONFIG) --libs libcurl)
 
 CFLAGS ?= -O2 -g -Wall -Wextra -pthread
 LDFLAGS ?= -pthread
-LIBS := $(SDL2_LIBS)
+LIBS := $(CURL_LIBS)
 
 INSTALL ?= install
 DESTDIR ?=
@@ -27,10 +25,10 @@ DESTDIR ?=
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CC) $(CFLAGS) $(CURL_CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(SDL2_CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(CURL_CFLAGS) -c -o $@ $<
 
 install: $(TARGET)
 	$(INSTALL) -D -m 0755 $(TARGET) $(DESTDIR)$(JOYSTICK2CRSF_BIN)
