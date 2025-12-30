@@ -35,6 +35,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -1209,6 +1210,22 @@ static int64_t timespec_diff_ns(const struct timespec *start, const struct times
     return sec * NS_PER_SEC + nsec;
 }
 
+static int count_open_fds(void)
+{
+    int count = 0;
+    DIR *dir = opendir("/proc/self/fd");
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_name[0] != '.') {
+                count++;
+            }
+        }
+        closedir(dir);
+    }
+    return count;
+}
+
 static void reset_key_tracking(int key_active[16], int key_low_active[16],
                                struct timespec key_start[16],
                                struct timespec key_low_start[16])
@@ -1527,8 +1544,14 @@ int main(int argc, char **argv)
                 int a1 = js ? SDL_JoystickGetAxis(js, 1) : 0;
                 int a2 = js ? SDL_JoystickGetAxis(js, 2) : 0;
                 int a3 = js ? SDL_JoystickGetAxis(js, 3) : 0;
-                action_log_verbose("Main loop heartbeat (events=%llu, axes=[%d, %d, %d, %d])",
-                                   (unsigned long long)wake_events, a0, a1, a2, a3);
+                int fds = count_open_fds();
+                int rumble_rc = -2;
+                if (gc) {
+                    /* Send 0-strength rumble for 1ms to check liveness */
+                    rumble_rc = SDL_GameControllerRumble(gc, 0, 0, 1);
+                }
+                action_log_verbose("Main loop heartbeat (events=%llu, axes=[%d, %d, %d, %d], fds=%d, rumble=%d)",
+                                   (unsigned long long)wake_events, a0, a1, a2, a3, fds, rumble_rc);
                 last_heartbeat = now;
             }
 
