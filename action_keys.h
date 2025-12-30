@@ -109,4 +109,6 @@ void action_keys_build_watchlist(const action_keys_config_t *cfg,
                                  int watch_high[16],
                                  int watch_low[16]);
 
+void action_log_verbose(const char *fmt, ...);
+
 #endif

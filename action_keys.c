@@ -22,10 +22,28 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <arpa/inet.h>
+#include <stdarg.h>
+#include <sys/syscall.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+
+void action_log_verbose(const char *fmt, ...)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    long tid = syscall(SYS_gettid);
+
+    char buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    fprintf(stderr, "[%ld.%06ld] [TID:%ld] %s\n",
+            (long)ts.tv_sec, (long)(ts.tv_nsec / 1000), tid, buf);
+}
 
 static int set_nonblock(int fd)
 {
@@ -61,6 +79,7 @@ static void trim(char *s)
 
 static int resolve_ip_target(const char *host, const char *port, struct sockaddr_storage *addr, socklen_t *addrlen)
 {
+    action_log_verbose("resolve_ip_target: resolving %s:%s", host, port);
     if (!host || !port || !addr || !addrlen) {
         return -1;
     }
@@ -438,11 +457,17 @@ static void *action_worker_thread(void *arg)
         action_queue_item_t item;
         int has_item = 0;
 
+        action_log_verbose("worker: loop start, acquiring lock");
         pthread_mutex_lock(&w->mutex);
+        action_log_verbose("worker: lock acquired");
+
         while (w->running && w->head == w->tail) {
+            action_log_verbose("worker: waiting for work");
             pthread_cond_wait(&w->cond, &w->mutex);
+            action_log_verbose("worker: woke up");
         }
         if (!w->running) {
+            action_log_verbose("worker: stopping");
             pthread_mutex_unlock(&w->mutex);
             break;
         }
@@ -451,19 +476,17 @@ static void *action_worker_thread(void *arg)
         w->head = (w->head + 1) % ACTION_QUEUE_SIZE;
         has_item = 1;
         pthread_mutex_unlock(&w->mutex);
+        action_log_verbose("worker: popped item for %s, lock released", item.spec.destination);
 
         if (has_item) {
             int rc = -1;
+            action_log_verbose("worker: processing start");
             if (item.spec.transport == ACTION_TRANSPORT_UDP) {
                 rc = send_udp(w, item.index, &item.spec);
             } else {
                 rc = send_http(&item.spec);
             }
-            if (rc != 0) {
-                /* Log failure if needed, but we don't have access to cfg here easily.
-                   We could add verbose flag to worker if we really wanted to log from here. */
-                // fprintf(stderr, "Action failed: %s\n", item.spec.destination);
-            }
+            action_log_verbose("worker: processing done (rc=%d)", rc);
         }
     }
     return NULL;
@@ -522,17 +545,23 @@ static void enqueue_action(action_worker_t *worker, int index, const action_spec
 {
     if (!worker || !worker->running) return;
 
+    action_log_verbose("enqueue_action: acquiring lock for %s", spec->destination);
     pthread_mutex_lock(&worker->mutex);
+    action_log_verbose("enqueue_action: lock acquired");
+
     int next_tail = (worker->tail + 1) % ACTION_QUEUE_SIZE;
     if (next_tail != worker->head) {
         worker->queue[worker->tail].index = index;
         worker->queue[worker->tail].spec = *spec;
         worker->tail = next_tail;
         pthread_cond_signal(&worker->cond);
+        action_log_verbose("enqueue_action: queued and signaled");
     } else {
         /* Dropping action; do not log to stderr to avoid blocking the main thread */
+        action_log_verbose("enqueue_action: queue full, dropped");
     }
     pthread_mutex_unlock(&worker->mutex);
+    action_log_verbose("enqueue_action: lock released");
 }
 
 void action_keys_config_defaults(action_keys_config_t *cfg)
