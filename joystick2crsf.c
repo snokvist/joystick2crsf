@@ -65,6 +65,8 @@
 #define MAVLINK_RANGE_US                (MAVLINK_MAX_US - MAVLINK_MIN_US)
 #define FRAME_BUFFER_MAX                ((CRSF_FRAME_LEN + 2) > MAVLINK_FRAME_LEN ? (CRSF_FRAME_LEN + 2) : MAVLINK_FRAME_LEN)
 
+#define INPUT_WATCHDOG_MS   5000
+
 #define PROTOCOL_CRSF       0
 #define PROTOCOL_MAVLINK    1
 
@@ -1471,6 +1473,7 @@ int main(int argc, char **argv)
         struct timespec stats_window_start = next_rescan;
         struct timespec last_loop = next_rescan;
         struct timespec last_heartbeat = next_rescan;
+        struct timespec last_input_time = next_rescan;
 
         uint8_t frame[FRAME_BUFFER_MAX];
         size_t frame_len = 0;
@@ -1528,6 +1531,12 @@ int main(int argc, char **argv)
                         ev.type == SDL_CONTROLLERDEVICEREMOVED) {
                         next_rescan = now;
                         action_log_verbose("SDL device event type: %d", ev.type);
+                    }
+                    if (ev.type == SDL_JOYAXISMOTION || ev.type == SDL_JOYBUTTONDOWN ||
+                        ev.type == SDL_JOYBUTTONUP || ev.type == SDL_JOYHATMOTION ||
+                        ev.type == SDL_CONTROLLERAXISMOTION ||
+                        ev.type == SDL_CONTROLLERBUTTONDOWN || ev.type == SDL_CONTROLLERBUTTONUP) {
+                        last_input_time = now;
                     }
                     events_processed++;
                     if (events_processed >= 2000) {
@@ -1649,6 +1658,7 @@ int main(int argc, char **argv)
                             }
                             fprintf(stderr, "Game controller %d connected: %s\n",
                                     cfg.joystick_index, name ? name : "unknown");
+                            last_input_time = now;
                         } else {
                             fprintf(stderr, "Failed to open game controller %d: %s\n",
                                     cfg.joystick_index, SDL_GetError());
@@ -1683,6 +1693,7 @@ int main(int argc, char **argv)
                                 fprintf(stderr, "Joystick %d connected: %s\n",
                                         cfg.joystick_index, name ? name : "unknown");
                             }
+                            last_input_time = now;
                         } else {
                             fprintf(stderr, "Failed to open joystick %d: %s\n",
                                     cfg.joystick_index, SDL_GetError());
@@ -1721,6 +1732,25 @@ int main(int argc, char **argv)
                 next_rescan = timespec_add(now, cfg.rescan_interval, 0);
                 struct timespec delay = { .tv_sec = 1, .tv_nsec = 0 };
                 nanosleep(&delay, NULL);
+                continue;
+            }
+
+            if (js && timespec_diff_ms(&last_input_time, &now) > INPUT_WATCHDOG_MS) {
+                action_log_verbose("Input watchdog timeout (%dms): forcing device reset", INPUT_WATCHDOG_MS);
+                if (gc) {
+                    SDL_GameControllerClose(gc);
+                    gc = NULL;
+                }
+                if (js_owned && js) {
+                    SDL_JoystickClose(js);
+                }
+                js = NULL;
+                js_owned = 0;
+                arm_press_active = 0;
+                arm_sticky = 0;
+                reset_key_tracking(key_press_active, key_press_low_active,
+                                   key_press_start, key_press_low_start);
+                next_rescan = now;
                 continue;
             }
 
