@@ -142,6 +142,7 @@ typedef struct {
 typedef struct {
     int fd;
     char name[256];
+    char path[512];
     /* Simplified state tracking: map standard EV_ABS and EV_KEY to values */
     /* Axis values are raw from the kernel. We will normalize them later. */
     int32_t abs[ABS_CNT];
@@ -1287,6 +1288,7 @@ static int open_joystick_device(int index, joystick_t *js)
         if (TEST_BIT(EV_KEY, evbit) && TEST_BIT(EV_ABS, evbit)) {
             if (found_count == index) {
                 found_fd = fd;
+                snprintf(js->path, sizeof(js->path), "%s", path);
                 ioctl(fd, EVIOCGNAME(sizeof(js->name)), js->name);
                 /* Read abs info to handle scaling */
                 unsigned long absbit[NBITS(ABS_MAX)];
@@ -1343,11 +1345,15 @@ static void read_joystick_events(joystick_t *js)
                     if (js->has_abs[ev[i].code]) {
                         struct input_absinfo *info = &js->abs_info[ev[i].code];
                         if (info->minimum != info->maximum) {
-                            /* Scale to -32768..32767 */
-                            int64_t range = info->maximum - info->minimum;
-                            int64_t centered = (int64_t)val - info->minimum;
-                            /* Map 0..range to -32768..32767 */
-                            val = (int)((centered * 65535 / range) - 32768);
+                            if (val == 0 && info->minimum < 0 && info->maximum > 0) {
+                                val = 0;
+                            } else {
+                                /* Scale to -32768..32767 */
+                                int64_t range = info->maximum - info->minimum;
+                                int64_t centered = (int64_t)val - info->minimum;
+                                /* Map 0..range to -32768..32767 */
+                                val = (int)((centered * 65535 / range) - 32768);
+                            }
                         }
                     }
                     js->abs[ev[i].code] = val;
@@ -1623,7 +1629,8 @@ int main(int argc, char **argv)
 
             if (js_device.fd < 0 && timespec_cmp(&now, &next_rescan) >= 0) {
                 if (open_joystick_device(cfg.joystick_index, &js_device) == 0) {
-                    fprintf(stderr, "Joystick %d connected: %s\n", cfg.joystick_index, js_device.name);
+                    fprintf(stderr, "Joystick %d connected: %s (%s)\n",
+                            cfg.joystick_index, js_device.name, js_device.path);
                 } else {
                     /* Failed to find device */
                 }
