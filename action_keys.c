@@ -442,7 +442,9 @@ static void *action_worker_thread(void *arg)
         action_queue_item_t item;
         int has_item = 0;
 
+        action_log_verbose("worker: locking");
         pthread_mutex_lock(&w->mutex);
+        action_log_verbose("worker: locked");
 
         while (w->running && w->head == w->tail) {
             pthread_cond_wait(&w->cond, &w->mutex);
@@ -528,7 +530,9 @@ static void enqueue_action(action_worker_t *worker, int index, const action_spec
 {
     if (!worker || !worker->running) return;
 
+    action_log_verbose("enqueue_action: attempt lock for %s", spec->destination);
     pthread_mutex_lock(&worker->mutex);
+    action_log_verbose("enqueue_action: locked");
 
     int next_tail = (worker->tail + 1) % ACTION_QUEUE_SIZE;
     if (next_tail != worker->head) {

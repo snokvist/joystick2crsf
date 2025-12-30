@@ -1448,6 +1448,7 @@ int main(int argc, char **argv)
 
         struct timespec stats_window_start = next_rescan;
         struct timespec last_loop = next_rescan;
+        struct timespec last_heartbeat = next_rescan;
 
         uint8_t frame[FRAME_BUFFER_MAX];
         size_t frame_len = 0;
@@ -1504,6 +1505,7 @@ int main(int argc, char **argv)
                         ev.type == SDL_CONTROLLERDEVICEADDED ||
                         ev.type == SDL_CONTROLLERDEVICEREMOVED) {
                         next_rescan = now;
+                        action_log_verbose("SDL device event type: %d", ev.type);
                     }
                     events_processed++;
                     if (events_processed >= 2000) {
@@ -1514,6 +1516,11 @@ int main(int argc, char **argv)
             }
 
             clock_gettime(CLOCK_MONOTONIC, &now);
+
+            if (timespec_diff_ms(&last_heartbeat, &now) >= 5000) {
+                action_log_verbose("Main loop heartbeat (events=%llu)", (unsigned long long)wake_events);
+                last_heartbeat = now;
+            }
 
             double waited_s = (double)timespec_diff_ns(&wait_start, &now) / 1e9;
             if (waited_s < wait_min) {
@@ -1748,11 +1755,13 @@ int main(int argc, char **argv)
                             if (!key_press_active[i]) {
                                 key_press_start[i] = now;
                                 key_press_active[i] = 1;
+                                action_log_verbose("CH %d high press start (val=%u)", i, ch_out[i]);
                             }
                         } else if (key_press_active[i] && ch_out[i] <= KEY_TRIGGER_LOW) {
                             int64_t held = timespec_diff_ms(&key_press_start[i], &now);
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
+                            action_log_verbose("CH %d high release (val=%u, held=%ld ms)", i, ch_out[i], (long)held);
                             action_keys_handle_press(&action_keys.cfg, &action_keys.worker,
                                                      &action_keys.state, i, ACTION_EDGE_HIGH, press, &now);
                             key_press_active[i] = 0;
