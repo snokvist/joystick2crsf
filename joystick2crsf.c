@@ -773,12 +773,9 @@ static void build_channels(const joystick_t *js, const int dead[16],
     /* D-Pad */
     int32_t dpx = js->abs[ABS_HAT0X];
     int32_t dpy = js->abs[ABS_HAT0Y];
-    /* Hat values are usually -1, 0, 1. Scale to axis range. */
-    /* If they are already scaled (some drivers?), clamp. */
-    if (dpx > 1 || dpx < -1) { /* likely analog */ }
-    else { dpx *= 32767; }
-    if (dpy > 1 || dpy < -1) { /* likely analog */ }
-    else { dpy *= -32767; } /* D-Pad up is usually -1 in Y */
+
+    /* dpy: D-Pad up is usually -1 in evdev, but we want Up to be positive in CRSF */
+    dpy = -dpy;
 
     ch_r[6] = dpx;
     ch_r[7] = dpy;
@@ -1238,6 +1235,20 @@ static void action_keys_runtime_reload(action_keys_runtime_t *ak,
 
 /* ------------------------------- Joystick ---------------------------------- */
 
+static int32_t scale_evdev_abs(int32_t val, const struct input_absinfo *info)
+{
+    if (info->minimum == info->maximum) {
+        return val;
+    }
+    if (val == 0 && info->minimum < 0 && info->maximum > 0) {
+        return 0;
+    }
+    int64_t range = (int64_t)info->maximum - (int64_t)info->minimum;
+    int64_t centered = (int64_t)val - (int64_t)info->minimum;
+    /* Map 0..range to -32768..32767 */
+    return (int32_t)((centered * 65535 / range) - 32768);
+}
+
 static int open_joystick_device(int index, joystick_t *js)
 {
     if (!js) return -1;
@@ -1314,6 +1325,10 @@ static int open_joystick_device(int index, joystick_t *js)
                                         fprintf(stderr, "    (disabled kernel fuzz/flat)\n");
                                     }
                                 }
+                                /* Initialize with current value */
+                                if (ioctl(fd, EVIOCGABS(j), &js->abs_info[j]) >= 0) {
+                                    js->abs[j] = scale_evdev_abs(js->abs_info[j].value, &js->abs_info[j]);
+                                }
                             }
                         }
                     }
@@ -1359,18 +1374,7 @@ static void read_joystick_events(joystick_t *js)
                     /* Normalize to -32768..32767 */
                     int val = ev[i].value;
                     if (js->has_abs[ev[i].code]) {
-                        struct input_absinfo *info = &js->abs_info[ev[i].code];
-                        if (info->minimum != info->maximum) {
-                            if (val == 0 && info->minimum < 0 && info->maximum > 0) {
-                                val = 0;
-                            } else {
-                                /* Scale to -32768..32767 */
-                                int64_t range = info->maximum - info->minimum;
-                                int64_t centered = (int64_t)val - info->minimum;
-                                /* Map 0..range to -32768..32767 */
-                                val = (int)((centered * 65535 / range) - 32768);
-                            }
-                        }
+                        val = scale_evdev_abs(val, &js->abs_info[ev[i].code]);
                     }
                     js->abs[ev[i].code] = val;
                 }
