@@ -1298,6 +1298,22 @@ static int open_joystick_device(int index, joystick_t *js)
                             js->has_abs[j] = 1;
                             if (ioctl(fd, EVIOCGABS(j), &js->abs_info[j]) < 0) {
                                 /* failed to get info, assume default */
+                            } else {
+                                fprintf(stderr, "  Axis %d: min=%d max=%d fuzz=%d flat=%d res=%d\n",
+                                        j, js->abs_info[j].minimum, js->abs_info[j].maximum,
+                                        js->abs_info[j].fuzz, js->abs_info[j].flat,
+                                        js->abs_info[j].resolution);
+
+                                /* Force fuzz/flat to 0 to get raw high-res input */
+                                if (js->abs_info[j].fuzz != 0 || js->abs_info[j].flat != 0) {
+                                    js->abs_info[j].fuzz = 0;
+                                    js->abs_info[j].flat = 0;
+                                    if (ioctl(fd, EVIOCSABS(j), &js->abs_info[j]) < 0) {
+                                        perror("    failed to disable fuzz/flat");
+                                    } else {
+                                        fprintf(stderr, "    (disabled kernel fuzz/flat)\n");
+                                    }
+                                }
                             }
                         }
                     }
