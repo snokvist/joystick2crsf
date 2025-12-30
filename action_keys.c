@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <arpa/inet.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -56,6 +57,41 @@ static void trim(char *s)
         memmove(s, start, len);
     }
     s[len] = '\0';
+}
+
+static int resolve_ip_target(const char *host, const char *port, struct sockaddr_storage *addr, socklen_t *addrlen)
+{
+    if (!host || !port || !addr || !addrlen) {
+        return -1;
+    }
+
+    int port_num = atoi(port);
+    if (port_num <= 0 || port_num > 65535) {
+        return -1;
+    }
+
+    struct sockaddr_in *sin = (struct sockaddr_in *)addr;
+    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
+
+    memset(addr, 0, sizeof(*addr));
+
+    /* Try IPv4 */
+    if (inet_pton(AF_INET, host, &sin->sin_addr) == 1) {
+        sin->sin_family = AF_INET;
+        sin->sin_port = htons((uint16_t)port_num);
+        *addrlen = sizeof(struct sockaddr_in);
+        return 0;
+    }
+
+    /* Try IPv6 */
+    if (inet_pton(AF_INET6, host, &sin6->sin6_addr) == 1) {
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_port = htons((uint16_t)port_num);
+        *addrlen = sizeof(struct sockaddr_in6);
+        return 0;
+    }
+
+    return -1;
 }
 
 static int parse_host_port(const char *spec, char **host_out, char **port_out)
@@ -115,30 +151,21 @@ static int open_udp_target(const char *target, struct sockaddr_storage *addr, so
         return -1;
     }
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_DGRAM;
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host, port, &hints, &res);
-    free(host);
-    free(port);
+    int rc = resolve_ip_target(host, port, addr, addrlen);
     if (rc != 0) {
-        fprintf(stderr, "UDP getaddrinfo: %s\n", gai_strerror(rc));
+        fprintf(stderr, "Invalid IP address or port: %s:%s (must be direct IP)\n", host, port);
+        free(host);
+        free(port);
         return -1;
     }
 
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd >= 0) {
-            memcpy(addr, ai->ai_addr, ai->ai_addrlen);
-            *addrlen = (socklen_t)ai->ai_addrlen;
-            break;
-        }
-    }
-    freeaddrinfo(res);
+    /* We need to determine family to create socket, which is inside addr */
+    int family = ((struct sockaddr *)addr)->sa_family;
+    int fd = socket(family, SOCK_DGRAM, 0);
+
+    free(host);
+    free(port);
+
     if (fd < 0) {
         perror("udp socket");
     } else {
@@ -260,40 +287,32 @@ static int send_http(const action_spec_t *spec)
         return -1;
     }
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(host, port, &hints, &res);
-    if (rc != 0 || !res) {
+    struct sockaddr_storage addr;
+    socklen_t addrlen = 0;
+    int rc = resolve_ip_target(host, port, &addr, &addrlen);
+    if (rc != 0) {
         free(host);
         free(port);
         free(path);
-        if (res) {
-            freeaddrinfo(res);
-        }
         return -1;
     }
 
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) {
-            continue;
-        }
+    int family = ((struct sockaddr *)&addr)->sa_family;
+    int fd = socket(family, SOCK_STREAM, 0);
+    if (fd >= 0) {
         struct timeval tv;
         tv.tv_sec = spec->timeout_ms / 1000;
         tv.tv_usec = (spec->timeout_ms % 1000) * 1000;
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-            break;
+
+        if (connect(fd, (struct sockaddr *)&addr, addrlen) != 0) {
+            /* If blocking connect fails, or if we want strict non-blocking we might need more logic.
+               But usually SO_SNDTIMEO handles the timeout. */
+            close(fd);
+            fd = -1;
         }
-        close(fd);
-        fd = -1;
     }
-    freeaddrinfo(res);
     if (fd < 0) {
         free(host);
         free(port);
@@ -511,7 +530,7 @@ static void enqueue_action(action_worker_t *worker, int index, const action_spec
         worker->tail = next_tail;
         pthread_cond_signal(&worker->cond);
     } else {
-        fprintf(stderr, "Action queue full, dropping action for %s\n", spec->destination);
+        /* Dropping action; do not log to stderr to avoid blocking the main thread */
     }
     pthread_mutex_unlock(&worker->mutex);
 }
