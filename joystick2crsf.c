@@ -1287,7 +1287,7 @@ static int open_joystick_device(int index, joystick_t *js)
             continue;
         }
 
-        unsigned long evbit[NBITS(EV_MAX)];
+        unsigned long evbit[NBITS(EV_CNT)];
         memset(evbit, 0, sizeof(evbit));
         if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit) < 0) {
             close(fd);
@@ -1302,7 +1302,7 @@ static int open_joystick_device(int index, joystick_t *js)
                 snprintf(js->path, sizeof(js->path), "%s", path);
                 ioctl(fd, EVIOCGNAME(sizeof(js->name)), js->name);
                 /* Read abs info to handle scaling */
-                unsigned long absbit[NBITS(ABS_MAX)];
+                unsigned long absbit[NBITS(ABS_CNT)];
                 if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbit)), absbit) >= 0) {
                     for (int j = 0; j < ABS_CNT; j++) {
                         if (TEST_BIT(j, absbit)) {
