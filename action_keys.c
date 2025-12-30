@@ -442,17 +442,12 @@ static void *action_worker_thread(void *arg)
         action_queue_item_t item;
         int has_item = 0;
 
-        action_log_verbose("worker: loop start, acquiring lock");
         pthread_mutex_lock(&w->mutex);
-        action_log_verbose("worker: lock acquired");
 
         while (w->running && w->head == w->tail) {
-            action_log_verbose("worker: waiting for work");
             pthread_cond_wait(&w->cond, &w->mutex);
-            action_log_verbose("worker: woke up");
         }
         if (!w->running) {
-            action_log_verbose("worker: stopping");
             pthread_mutex_unlock(&w->mutex);
             break;
         }
@@ -461,15 +456,14 @@ static void *action_worker_thread(void *arg)
         w->head = (w->head + 1) % ACTION_QUEUE_SIZE;
         has_item = 1;
         pthread_mutex_unlock(&w->mutex);
-        action_log_verbose("worker: popped item for %s, lock released", item.spec.destination);
-        /* Replaces "action (queued)" log from main thread */
+
+        /* Logging happens OUTSIDE the lock to prevent blocking the main thread */
         action_log_verbose("action (executing) %s -> %s",
                            (item.spec.transport == ACTION_TRANSPORT_UDP) ? "udp" : "http",
                            item.spec.destination);
 
         if (has_item) {
             int rc = -1;
-            action_log_verbose("worker: processing start");
             if (item.spec.transport == ACTION_TRANSPORT_UDP) {
                 rc = send_udp(w, item.index, &item.spec);
             } else {
