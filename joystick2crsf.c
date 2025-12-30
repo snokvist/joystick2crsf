@@ -1327,10 +1327,15 @@ int main(int argc, char **argv)
             worker_prio = (cfg.scheduler_prio > 10) ? 20 : (cfg.scheduler_prio / 2);
         }
 
-        action_keys_runtime_t action_keys;
-        action_keys_runtime_init(&action_keys, worker_prio);
+        action_keys_runtime_t *action_keys = calloc(1, sizeof(action_keys_runtime_t));
+        if (!action_keys) {
+            fprintf(stderr, "Out of memory allocating action keys runtime\n");
+            exit_code = 1;
+            break;
+        }
+        action_keys_runtime_init(action_keys, worker_prio);
         int action_conf_readable = (access(conf_path, R_OK) == 0);
-        action_keys_runtime_reload(&action_keys, conf_path,
+        action_keys_runtime_reload(action_keys, conf_path,
                                    !action_conf_readable && !action_keys_warned_missing,
                                    worker_prio);
         if (!action_conf_readable) {
@@ -1518,7 +1523,12 @@ int main(int argc, char **argv)
             clock_gettime(CLOCK_MONOTONIC, &now);
 
             if (timespec_diff_ms(&last_heartbeat, &now) >= 5000) {
-                action_log_verbose("Main loop heartbeat (events=%llu)", (unsigned long long)wake_events);
+                int a0 = js ? SDL_JoystickGetAxis(js, 0) : 0;
+                int a1 = js ? SDL_JoystickGetAxis(js, 1) : 0;
+                int a2 = js ? SDL_JoystickGetAxis(js, 2) : 0;
+                int a3 = js ? SDL_JoystickGetAxis(js, 3) : 0;
+                action_log_verbose("Main loop heartbeat (events=%llu, axes=[%d, %d, %d, %d])",
+                                   (unsigned long long)wake_events, a0, a1, a2, a3);
                 last_heartbeat = now;
             }
 
@@ -1747,9 +1757,9 @@ int main(int argc, char **argv)
                 }
             }
 
-            if (action_keys.enabled) {
+            if (action_keys->enabled) {
                 for (int i = 0; i < 16; i++) {
-                    if (action_keys.watch_high[i]) {
+                    if (action_keys->watch_high[i]) {
                         int pressed = ch_out[i] >= KEY_TRIGGER_HIGH;
                         if (pressed) {
                             if (!key_press_active[i]) {
@@ -1762,12 +1772,12 @@ int main(int argc, char **argv)
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
                             action_log_verbose("CH %d high release (val=%u, held=%ld ms)", i, ch_out[i], (long)held);
-                            action_keys_handle_press(&action_keys.cfg, &action_keys.worker,
-                                                     &action_keys.state, i, ACTION_EDGE_HIGH, press, &now);
+                            action_keys_handle_press(&action_keys->cfg, &action_keys->worker,
+                                                     &action_keys->state, i, ACTION_EDGE_HIGH, press, &now);
                             key_press_active[i] = 0;
                         }
                     }
-                    if (action_keys.watch_low[i]) {
+                    if (action_keys->watch_low[i]) {
                         int pressed_low = ch_out[i] <= KEY_TRIGGER_NEG_HIGH;
                         if (pressed_low) {
                             if (!key_press_low_active[i]) {
@@ -1778,14 +1788,14 @@ int main(int argc, char **argv)
                             int64_t held = timespec_diff_ms(&key_press_low_start[i], &now);
                             action_press_t press = (held >= cfg.key_long_threshold_ms) ?
                                 ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
-                            action_keys_handle_press(&action_keys.cfg, &action_keys.worker,
-                                                     &action_keys.state, i, ACTION_EDGE_LOW, press, &now);
+                            action_keys_handle_press(&action_keys->cfg, &action_keys->worker,
+                                                     &action_keys->state, i, ACTION_EDGE_LOW, press, &now);
                             key_press_low_active[i] = 0;
                         }
                     }
                 }
-                action_keys_process_pending(&action_keys.cfg, &action_keys.worker,
-                                            &action_keys.state, &now);
+                action_keys_process_pending(&action_keys->cfg, &action_keys->worker,
+                                            &action_keys->state, &now);
             }
 
             int ready_for_frame = (timespec_cmp(&now, &next_frame) >= 0);
@@ -1923,7 +1933,8 @@ int main(int argc, char **argv)
             close(sse_fd);
             sse_fd = -1;
         }
-        action_keys_worker_stop(&action_keys.worker);
+        action_keys_worker_stop(&action_keys->worker);
+        free(action_keys);
 
         if (fatal_error || !g_run) {
             break;
