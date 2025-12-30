@@ -442,9 +442,8 @@ static void *action_worker_thread(void *arg)
         action_queue_item_t item;
         int has_item = 0;
 
-        action_log_verbose("worker: locking");
+        /* Logging inside lock removed to prevent blocking main thread */
         pthread_mutex_lock(&w->mutex);
-        action_log_verbose("worker: locked");
 
         while (w->running && w->head == w->tail) {
             pthread_cond_wait(&w->cond, &w->mutex);
@@ -459,13 +458,13 @@ static void *action_worker_thread(void *arg)
         has_item = 1;
         pthread_mutex_unlock(&w->mutex);
 
-        /* Logging happens OUTSIDE the lock to prevent blocking the main thread */
         action_log_verbose("action (executing) %s -> %s",
                            (item.spec.transport == ACTION_TRANSPORT_UDP) ? "udp" : "http",
                            item.spec.destination);
 
         if (has_item) {
             int rc = -1;
+            /* action_log_verbose("worker: processing start"); */
             if (item.spec.transport == ACTION_TRANSPORT_UDP) {
                 rc = send_udp(w, item.index, &item.spec);
             } else {
@@ -530,9 +529,8 @@ static void enqueue_action(action_worker_t *worker, int index, const action_spec
 {
     if (!worker || !worker->running) return;
 
-    action_log_verbose("enqueue_action: attempt lock for %s", spec->destination);
+    /* Logging removed to prevent blocking main thread */
     pthread_mutex_lock(&worker->mutex);
-    action_log_verbose("enqueue_action: locked");
 
     int next_tail = (worker->tail + 1) % ACTION_QUEUE_SIZE;
     if (next_tail != worker->head) {
