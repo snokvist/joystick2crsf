@@ -415,22 +415,7 @@ static int send_http(const action_spec_t *spec)
     return 0;
 }
 
-static void maybe_log(const action_keys_config_t *cfg,
-                      const action_spec_t *spec,
-                      const char *event,
-                      int rc)
-{
-    if (!cfg || !cfg->verbose) {
-        return;
-    }
-    if (spec) {
-        const char *transport = (spec->transport == ACTION_TRANSPORT_HTTP) ? "http" : "udp";
-        fprintf(stderr, "%s %s -> %s (%s)\n",
-                event, transport, spec->destination, rc == 0 ? "ok" : "fail");
-    } else {
-        fprintf(stderr, "%s\n", event);
-    }
-}
+/* maybe_log removed to prevent main thread blocking on stderr */
 
 /* Worker Thread Implementation */
 
@@ -477,6 +462,10 @@ static void *action_worker_thread(void *arg)
         has_item = 1;
         pthread_mutex_unlock(&w->mutex);
         action_log_verbose("worker: popped item for %s, lock released", item.spec.destination);
+        /* Replaces "action (queued)" log from main thread */
+        action_log_verbose("action (executing) %s -> %s",
+                           (item.spec.transport == ACTION_TRANSPORT_UDP) ? "udp" : "http",
+                           item.spec.destination);
 
         if (has_item) {
             int rc = -1;
@@ -545,9 +534,7 @@ static void enqueue_action(action_worker_t *worker, int index, const action_spec
 {
     if (!worker || !worker->running) return;
 
-    action_log_verbose("enqueue_action: acquiring lock for %s", spec->destination);
     pthread_mutex_lock(&worker->mutex);
-    action_log_verbose("enqueue_action: lock acquired");
 
     int next_tail = (worker->tail + 1) % ACTION_QUEUE_SIZE;
     if (next_tail != worker->head) {
@@ -555,13 +542,10 @@ static void enqueue_action(action_worker_t *worker, int index, const action_spec
         worker->queue[worker->tail].spec = *spec;
         worker->tail = next_tail;
         pthread_cond_signal(&worker->cond);
-        action_log_verbose("enqueue_action: queued and signaled");
     } else {
         /* Dropping action; do not log to stderr to avoid blocking the main thread */
-        action_log_verbose("enqueue_action: queue full, dropped");
     }
     pthread_mutex_unlock(&worker->mutex);
-    action_log_verbose("enqueue_action: lock released");
 }
 
 void action_keys_config_defaults(action_keys_config_t *cfg)
@@ -836,13 +820,9 @@ void action_keys_handle_press(const action_keys_config_t *cfg,
         int64_t diff = timespec_diff_ms_local(&state->last_dispatch, now);
         if (diff >= cfg->debounce_ms) {
             enqueue_action(worker, (int)i, a);
-            maybe_log(cfg, a, "action (queued)", 0);
             state->last_dispatch = *now;
             state->pending_idx = -1;
         } else {
-            if (state->pending_idx != (int)i) {
-                maybe_log(cfg, a, "action (pending)", 0);
-            }
             state->pending_idx = (int)i;
         }
     }
@@ -864,7 +844,6 @@ void action_keys_process_pending(const action_keys_config_t *cfg,
     int64_t diff = timespec_diff_ms_local(&state->last_dispatch, now);
     if (diff >= cfg->debounce_ms) {
         enqueue_action(worker, state->pending_idx, &cfg->actions[state->pending_idx]);
-        maybe_log(cfg, &cfg->actions[state->pending_idx], "action (queued from pending)", 0);
         state->last_dispatch = *now;
         state->pending_idx = -1;
     }
