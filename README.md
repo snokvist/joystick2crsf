@@ -22,14 +22,14 @@ channels through MAVLink when configured.
 
 ## Building
 
-The project depends on SDL2 headers, libcurl (for `action_keys`), and `pkg-config`. To build on a
+The project depends on SDL2 headers and `pkg-config`. To build on a
 development machine:
 
 ```sh
 set -euxo pipefail
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-  build-essential pkg-config libsdl2-dev libcurl4-openssl-dev
+  build-essential pkg-config libsdl2-dev
 make
 ```
 
@@ -75,32 +75,9 @@ endef
 The resulting root filesystem will include the binary in `/usr/bin`, the configuration under `/etc`,
 and init files in the usual systemd and sysvinit locations.
 
-If gamepad devices appear slowly during boot, set `startup_delay` in the configuration (seconds,
-defaults to 5) to pause before the first device discovery; set to `0` to disable the delay. Channels
-use CRSF scaling where 1811 is max and 172 is min. High-edge presses arm at 1700 and release at
-1500, leaving a 200-count hysteresis. Low-edge presses mirror that around the CRSF minimum: they
-trigger at 283 (1811 symmetrical to 1700) and release at 483, keeping the same gap to avoid
-chattering while the stick settles.
+If gamepad devices appear slowly during boot, set `startup_delay` in the configuration
+(seconds, defaults to 5) to pause before the first device discovery; set to `0` to
+disable the delay. Channels use CRSF scaling where 1811 is max and 172 is min.
 
-## Action keys configuration
-
-`joystick2crsf` reads `action_*` entries from the main `/etc/joystick2crsf.conf` and fires UDP or
-HTTP actions whenever channel thresholds trip. Actions are bound to channels, edge (high/low), and
-press type (short/long) while reusing the same hysteresis and timing as the built-in key-trigger
-logic.
-
-Key features:
-
-- Bind actions to channels with `channel`, `edge=high|low`, and `press=short|long|any`.
-- Tune action logging with `verbose=0|1` and HTTP timeouts with `http_timeout_ms` (ms).
-- Transports: `udp` (send payload verbatim) or `http` (`GET`/`POST` with optional headers).
-- Config fields: `destination`/`url`, `body`, `header`, and `timeout_ms`.
-
-Example config (inside `/etc/joystick2crsf.conf`):
-
-```
-action_1=channel=5,edge=high,press=short,transport=udp,url=udp://10.0.0.2:9000,body={"ping":1}
-action_2=channel=6,edge=low,press=long,transport=http,url=http://10.0.0.2/api,method=POST,body={"cmd":"start"}
-```
-
-Delete or comment out the `action_*` lines if you want to disable the action hooks.
+Note: action-key hooks have been removed. Existing `action_*` and related action
+configuration lines are ignored by current builds and should be deleted from local configs.

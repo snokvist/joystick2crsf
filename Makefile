@@ -1,5 +1,5 @@
 TARGET ?= joystick2crsf
-SRCS := joystick2crsf.c action_keys.c
+SRCS := joystick2crsf.c
 OBJS := $(SRCS:.c=.o)
 
 PREFIX ?= /usr
