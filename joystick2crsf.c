@@ -17,8 +17,6 @@
 #define _POSIX_C_SOURCE 200809L
 #define _GNU_SOURCE
 
-#include "action_keys.h"
-
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -77,29 +75,6 @@
 #define LONG(x) ((x)/BITS_PER_LONG)
 #define TEST_BIT(bit, array) ((array[LONG(bit)] >> OFF(bit)) & 1)
 
-/*
- * Keyboard triggers fire on release. A high-edge press starts when a channel reaches
- * KEY_TRIGGER_HIGH (1700) and releases once it falls to KEY_TRIGGER_LOW (1500). A 200-count
- * hysteresis prevents repeated toggles while the stick hovers near the threshold. Low-edge
- * presses mirror those values across the CRSF min/max so a press begins at 283 and releases at
- * 483, keeping the same hysteresis near CRSF_MIN.
- */
-#define KEY_TRIGGER_HIGH     1700
-#define KEY_TRIGGER_LOW      1500
-#define KEY_TRIGGER_NEG_HIGH (CRSF_MIN + (CRSF_MAX - KEY_TRIGGER_HIGH))
-#define KEY_TRIGGER_NEG_LOW  (CRSF_MIN + (CRSF_MAX - KEY_TRIGGER_LOW))
-#define KEY_LONG_DEFAULT_MS  700
-
-_Static_assert(KEY_TRIGGER_LOW < KEY_TRIGGER_HIGH, "Key trigger low must be below high");
-_Static_assert(KEY_TRIGGER_HIGH <= CRSF_MAX && KEY_TRIGGER_LOW >= CRSF_MIN,
-               "Key trigger thresholds must be within CRSF range");
-_Static_assert(KEY_TRIGGER_NEG_HIGH >= CRSF_MIN && KEY_TRIGGER_NEG_LOW <= CRSF_MAX,
-               "Negative key trigger thresholds must be within CRSF range");
-_Static_assert(KEY_TRIGGER_NEG_HIGH <= KEY_TRIGGER_NEG_LOW,
-               "Negative key trigger high must be above low");
-_Static_assert((CRSF_MAX - KEY_TRIGGER_HIGH) == (KEY_TRIGGER_NEG_HIGH - CRSF_MIN),
-               "Key trigger thresholds must be symmetric across CRSF min/max");
-
 #define DEFAULT_CONF       "/etc/joystick2crsf.conf"
 #define MAX_LINE_LEN       512
 
@@ -126,18 +101,8 @@ typedef struct {
     int rescan_interval;        /* seconds */
     int startup_delay;          /* seconds */
     int use_gamecontroller;     /* Ignored in evdev mode but kept for config compat */
-    int key_long_threshold_ms;
     int scheduler_prio;         /* SCHED_FIFO priority, or <= 0 for non-RT */
 } config_t;
-
-typedef struct {
-    action_keys_config_t cfg;
-    action_worker_t worker;
-    action_state_t state;
-    int watch_high[16];
-    int watch_low[16];
-    int enabled;
-} action_keys_runtime_t;
 
 typedef struct {
     int fd;
@@ -936,7 +901,6 @@ static void config_defaults(config_t *cfg)
     cfg->rescan_interval = 5;
     cfg->startup_delay = 5;
     cfg->use_gamecontroller = 1;
-    cfg->key_long_threshold_ms = KEY_LONG_DEFAULT_MS;
     cfg->scheduler_prio = 50;
     for (int i = 0; i < 16; i++) {
         cfg->map[i] = i;
@@ -952,8 +916,6 @@ static int config_load(config_t *cfg, const char *path)
         fprintf(stderr, "Failed to open config %s: %s\n", path, strerror(errno));
         return -1;
     }
-
-    static int warned_key_bindings = 0;
 
     char line[MAX_LINE_LEN];
     int lineno = 0;
@@ -1048,22 +1010,13 @@ static int config_load(config_t *cfg, const char *path)
             if (parse_bool_value(val, &b) == 0) {
                 cfg->use_gamecontroller = b;
             }
-        } else if (!strcasecmp(key, "key_long_threshold_ms")) {
-            cfg->key_long_threshold_ms = atoi(val);
         } else if (!strcasecmp(key, "scheduler_prio")) {
             cfg->scheduler_prio = atoi(val);
         } else if (!strncasecmp(key, "key_short", 9) ||
                    !strncasecmp(key, "key_long", 8) ||
                    !strcasecmp(key, "key_debug")) {
-            if (!warned_key_bindings) {
-                fprintf(stderr, "Deprecated key_* bindings are ignored; use action_* channel "
-                        "actions instead.\n");
-                warned_key_bindings = 1;
-            }
-        } else if (!strcasecmp(key, "verbose") ||
-                   !strcasecmp(key, "http_timeout_ms") ||
-                   !strncasecmp(key, "action_", 7)) {
-            /* Action bindings are parsed separately; ignore here to avoid warnings. */
+            fprintf(stderr, "%s:%d: deprecated key binding '%s' ignored\n",
+                    path, lineno, key);
         } else {
             fprintf(stderr, "%s:%d: unknown key '%s'\n", path, lineno, key);
         }
@@ -1116,9 +1069,6 @@ static int config_load(config_t *cfg, const char *path)
             cfg->mavlink_target_compid = 255;
         }
     }
-    if (cfg->key_long_threshold_ms <= 0) {
-        cfg->key_long_threshold_ms = KEY_LONG_DEFAULT_MS;
-    }
     return 0;
 }
 
@@ -1169,68 +1119,6 @@ static int64_t timespec_diff_ns(const struct timespec *start, const struct times
         nsec += NS_PER_SEC;
     }
     return sec * NS_PER_SEC + nsec;
-}
-
-static void reset_key_tracking(int key_active[16], int key_low_active[16],
-                               struct timespec key_start[16],
-                               struct timespec key_low_start[16])
-{
-    memset(key_active, 0, sizeof(int) * 16);
-    memset(key_low_active, 0, sizeof(int) * 16);
-    memset(key_start, 0, sizeof(struct timespec) * 16);
-    memset(key_low_start, 0, sizeof(struct timespec) * 16);
-}
-
-static void action_keys_runtime_init(action_keys_runtime_t *ak, int worker_prio)
-{
-    if (!ak) {
-        return;
-    }
-    memset(ak, 0, sizeof(*ak));
-    action_keys_worker_init(&ak->worker, worker_prio);
-    ak->state.pending_idx = -1;
-    // state.last_dispatch is 0 (epoch), allowing immediate first action
-    for (int i = 0; i < 16; i++) {
-        ak->watch_high[i] = 0;
-        ak->watch_low[i] = 0;
-    }
-}
-
-static void action_keys_runtime_reload(action_keys_runtime_t *ak,
-                                       const char *path,
-                                       int warn_missing,
-                                       int worker_prio)
-{
-    if (!ak) {
-        return;
-    }
-
-    /* Stop old worker to close sockets and clear queue */
-    action_keys_worker_stop(&ak->worker);
-    /* Re-init worker (fresh state) */
-    action_keys_worker_init(&ak->worker, worker_prio);
-
-    if (path && access(path, R_OK) != 0) {
-        if (warn_missing) {
-            fprintf(stderr, "Action keys disabled: cannot read %s (%s)\n",
-                    path, strerror(errno));
-        }
-        memset(&ak->cfg, 0, sizeof(ak->cfg));
-        ak->enabled = 0;
-        return;
-    }
-
-    action_keys_config_defaults(&ak->cfg);
-    if (action_keys_config_load(&ak->cfg, path) == 0 && ak->cfg.action_count > 0) {
-        action_keys_build_watchlist(&ak->cfg, ak->watch_high, ak->watch_low);
-        ak->enabled = 1;
-        if (ak->cfg.verbose) {
-            fprintf(stderr, "Action keys ready (%zu bindings)\n", ak->cfg.action_count);
-        }
-    } else {
-        ak->enabled = 0;
-        action_keys_build_watchlist(&ak->cfg, ak->watch_high, ak->watch_low);
-    }
 }
 
 /* ------------------------------- Joystick ---------------------------------- */
@@ -1418,7 +1306,6 @@ int main(int argc, char **argv)
 
     int exit_code = 0;
     int startup_delay_applied = 0;
-    int action_keys_warned_missing = 0;
 
     joystick_t js_device;
     memset(&js_device, 0, sizeof(js_device));
@@ -1438,22 +1325,6 @@ int main(int argc, char **argv)
         }
 
         try_rt(cfg.scheduler_prio);
-
-        int worker_prio = 0;
-        if (cfg.scheduler_prio > 0) {
-            /* If main loop is RT, run worker at lower RT priority */
-            worker_prio = (cfg.scheduler_prio > 10) ? 20 : (cfg.scheduler_prio / 2);
-        }
-
-        action_keys_runtime_t action_keys;
-        action_keys_runtime_init(&action_keys, worker_prio);
-        int action_conf_readable = (access(conf_path, R_OK) == 0);
-        action_keys_runtime_reload(&action_keys, conf_path,
-                                   !action_conf_readable && !action_keys_warned_missing,
-                                   worker_prio);
-        if (!action_conf_readable) {
-            action_keys_warned_missing = 1;
-        }
 
         if (!startup_delay_applied && cfg.startup_delay > 0) {
             fprintf(stderr, "Startup delay %d seconds before device discovery...\n",
@@ -1572,12 +1443,6 @@ int main(int argc, char **argv)
         int arm_press_active = 0;
         struct timespec arm_press_start = {0, 0};
 
-        int key_press_active[16] = {0};
-        int key_press_low_active[16] = {0};
-        struct timespec key_press_start[16];
-        struct timespec key_press_low_start[16];
-        reset_key_tracking(key_press_active, key_press_low_active,
-                           key_press_start, key_press_low_start);
 
         while (g_run && !restart_requested) {
             struct timespec now;
@@ -1617,8 +1482,6 @@ int main(int argc, char **argv)
                      fprintf(stderr, "Joystick disconnected.\n");
                      close(js_device.fd);
                      js_device.fd = -1;
-                     reset_key_tracking(key_press_active, key_press_low_active,
-                                        key_press_start, key_press_low_start);
                      next_rescan = now;
                 }
             }
@@ -1720,45 +1583,6 @@ int main(int argc, char **argv)
                     ch_out[arm_channel] = arm_low_value;
                     raw_out[arm_channel] = 0;
                 }
-            }
-
-            if (action_keys.enabled) {
-                for (int i = 0; i < 16; i++) {
-                    if (action_keys.watch_high[i]) {
-                        int pressed = ch_out[i] >= KEY_TRIGGER_HIGH;
-                        if (pressed) {
-                            if (!key_press_active[i]) {
-                                key_press_start[i] = now;
-                                key_press_active[i] = 1;
-                            }
-                        } else if (key_press_active[i] && ch_out[i] <= KEY_TRIGGER_LOW) {
-                            int64_t held = timespec_diff_ms(&key_press_start[i], &now);
-                            action_press_t press = (held >= cfg.key_long_threshold_ms) ?
-                                ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
-                            action_keys_handle_press(&action_keys.cfg, &action_keys.worker,
-                                                     &action_keys.state, i, ACTION_EDGE_HIGH, press, &now);
-                            key_press_active[i] = 0;
-                        }
-                    }
-                    if (action_keys.watch_low[i]) {
-                        int pressed_low = ch_out[i] <= KEY_TRIGGER_NEG_HIGH;
-                        if (pressed_low) {
-                            if (!key_press_low_active[i]) {
-                                key_press_low_start[i] = now;
-                                key_press_low_active[i] = 1;
-                            }
-                        } else if (key_press_low_active[i] && ch_out[i] >= KEY_TRIGGER_NEG_LOW) {
-                            int64_t held = timespec_diff_ms(&key_press_low_start[i], &now);
-                            action_press_t press = (held >= cfg.key_long_threshold_ms) ?
-                                ACTION_PRESS_LONG : ACTION_PRESS_SHORT;
-                            action_keys_handle_press(&action_keys.cfg, &action_keys.worker,
-                                                     &action_keys.state, i, ACTION_EDGE_LOW, press, &now);
-                            key_press_low_active[i] = 0;
-                        }
-                    }
-                }
-                action_keys_process_pending(&action_keys.cfg, &action_keys.worker,
-                                            &action_keys.state, &now);
             }
 
             int ready_for_frame = (timespec_cmp(&now, &next_frame) >= 0);
@@ -1888,7 +1712,6 @@ int main(int argc, char **argv)
             close(sse_fd);
             sse_fd = -1;
         }
-        action_keys_worker_stop(&action_keys.worker);
 
         if (fatal_error || !g_run) {
             break;
