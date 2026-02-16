@@ -1,9 +1,9 @@
 # Joystick2crsf
 
-Joystick2crsf is a small SDL2 utility that maps joystick inputs to Crossfire (CRSF) channels and
-streams them over UDP. It can also publish telemetry as a server-sent events stream, expose RC
-channels through MAVLink when configured, and forward serial receiver output to a second UDP
-destination with one framed protocol packet per UDP datagram.
+Joystick2crsf is a small Linux `evdev` utility that maps joystick inputs to Crossfire (CRSF)
+channels and streams them over UDP. It can also publish telemetry as a server-sent events stream,
+expose RC channels through MAVLink when configured, and forward serial receiver output to a second
+UDP destination with one framed protocol packet per UDP datagram.
 
 <img
   width="1920"
@@ -37,6 +37,22 @@ You can override toolchain variables if you are cross-compiling:
 ```sh
 make CC=aarch64-linux-gnu-gcc PKG_CONFIG="/path/to/target-pkg-config"
 ```
+
+## Running
+
+The binary reads `/etc/joystick2crsf.conf` by default:
+
+```sh
+joystick2crsf
+```
+
+You can pass a custom config path:
+
+```sh
+joystick2crsf /path/to/joystick2crsf.conf
+```
+
+Use `-h` or `--help` to print startup usage help.
 
 ## Installing
 
@@ -103,10 +119,34 @@ serial_packetizer=crsf
 
 You can run joystick output and serial passthrough at the same time with different UDP targets
 (for example `udp_target=...:14550` and `serial_udp_target=...:14551`).
-When SSE is enabled, joystick and serial data are published as separate SSE events
-(`event: joystick` and `event: serial`) with a `stream` field in the JSON payload.
-SSE output is throttled to `10 Hz` by default and emits the latest available frame per stream.
-Use `sse_rate_hz` in the config to change the SSE update rate (`1` to `100`).
+
+## SSE telemetry options
+
+Enable SSE in config:
+
+```ini
+sse_enabled=true
+sse_bind=0.0.0.0:8070
+sse_path=/sse
+sse_rate_hz=10
+```
+
+- `sse_enabled`: enables the HTTP SSE listener.
+- `sse_bind`: listener address in `host:port` form (`*:PORT` also works).
+- `sse_path`: HTTP path clients must request (for example `/sse`).
+- `sse_rate_hz`: SSE update rate (`1` to `100`), default `10`.
+
+When enabled, joystick and serial data are published as separate SSE events
+(`event: joystick` and `event: serial`) with a `stream` field in each JSON payload.
+Each stream emits the latest available frame at the configured rate.
+
+Quick test:
+
+```sh
+curl -Ns http://127.0.0.1:8070/sse
+```
+
+Only one SSE client is served at a time; a new connection replaces the previous client.
 
 Note: action-key hooks have been removed. Existing `action_*` and related action
 configuration lines are ignored by current builds and should be deleted from local configs.
