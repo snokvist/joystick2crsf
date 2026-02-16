@@ -1,5 +1,5 @@
 [Unit]
-Description=joystick2crsf joystick bridge
+Description=joystick2crsf joystick and serial bridge
 After=network-online.target
 Wants=network-online.target
 

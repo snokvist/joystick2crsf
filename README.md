@@ -1,8 +1,9 @@
 # Joystick2crsf
 
 Joystick2crsf is a small SDL2 utility that maps joystick inputs to Crossfire (CRSF) channels and
-streams them over UDP. It can also publish telemetry as a server-sent events stream and expose RC
-channels through MAVLink when configured.
+streams them over UDP. It can also publish telemetry as a server-sent events stream, expose RC
+channels through MAVLink when configured, and forward serial receiver output to a second UDP
+destination with one framed protocol packet per UDP datagram.
 
 <img
   width="1920"
@@ -22,14 +23,12 @@ channels through MAVLink when configured.
 
 ## Building
 
-The project depends on SDL2 headers and `pkg-config`. To build on a
-development machine:
+The project uses standard Linux and C library headers. To build on a development machine:
 
 ```sh
 set -euxo pipefail
 sudo apt-get update
-sudo apt-get install -y --no-install-recommends \
-  build-essential pkg-config libsdl2-dev
+sudo apt-get install -y --no-install-recommends build-essential
 make
 ```
 
@@ -61,8 +60,6 @@ checkout. In your package `.mk` file, call the build and install targets with Bu
 `TARGET_MAKE_ENV`:
 
 ```make
-JOYSTICK2CRSF_DEPENDENCIES = sdl2
-
 define JOYSTICK2CRSF_BUILD_CMDS
 $(TARGET_MAKE_ENV) $(MAKE) -C $(@D)
 endef
@@ -76,8 +73,34 @@ The resulting root filesystem will include the binary in `/usr/bin`, the configu
 and init files in the usual systemd and sysvinit locations.
 
 If gamepad devices appear slowly during boot, set `startup_delay` in the configuration
-(seconds, defaults to 5) to pause before the first device discovery; set to `0` to
-disable the delay. Channels use CRSF scaling where 1811 is max and 172 is min.
+(seconds, defaults to 5) to pause before the first device discovery; set to `0` to disable the
+delay. Channels use CRSF scaling where 1811 is max and 172 is min.
+
+Device and UDP reconnect attempts use `rescan_interval` seconds (default `10`), so if a joystick,
+serial device, or UDP target is temporarily unavailable, the process keeps running and retries.
+
+## Serial passthrough mode
+
+Use the serial passthrough settings when your ELRS receiver already emits valid CRSF or MAVLink
+frames on UART and you want those bytes wrapped directly into UDP datagrams:
+
+```ini
+serial_enabled=true
+serial_device=/dev/ttyS4
+serial_baud=420000
+serial_udp_enabled=true
+serial_udp_target=192.168.2.10:14551
+serial_packetizer=crsf
+```
+
+`serial_packetizer` controls framing for strict packet boundaries:
+
+- `crsf` (default): validates CRSF CRC and sends one CRSF frame per UDP packet.
+- `mavlink`: sends one MAVLink frame (v1/v2) per UDP packet using MAVLink framing bytes.
+- `raw`: forwards raw read chunks without packetizing.
+
+You can run joystick output and serial passthrough at the same time with different UDP targets
+(for example `udp_target=...:14550` and `serial_udp_target=...:14551`).
 
 Note: action-key hooks have been removed. Existing `action_*` and related action
 configuration lines are ignored by current builds and should be deleted from local configs.
