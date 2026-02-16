@@ -11,7 +11,7 @@ get_pids() {
         pidof "$DAEMON_NAME"
     else
         # -x to match scripts, -f to match full cmdline if needed
-        pgrep -x "$DAEMON_NAME" || pgrep -f "^$DAEMON([ ]|$)"
+        pgrep -x "$DAEMON_NAME" || pgrep -f "^$DAEMON_NAME([ ]|$)"
     fi
 }
 

@@ -23,14 +23,12 @@ destination with one framed protocol packet per UDP datagram.
 
 ## Building
 
-The project depends on SDL2 headers and `pkg-config`. To build on a
-development machine:
+The project uses standard Linux and C library headers. To build on a development machine:
 
 ```sh
 set -euxo pipefail
 sudo apt-get update
-sudo apt-get install -y --no-install-recommends \
-  build-essential pkg-config libsdl2-dev
+sudo apt-get install -y --no-install-recommends build-essential
 make
 ```
 
@@ -62,8 +60,6 @@ checkout. In your package `.mk` file, call the build and install targets with Bu
 `TARGET_MAKE_ENV`:
 
 ```make
-JOYSTICK2CRSF_DEPENDENCIES = sdl2
-
 define JOYSTICK2CRSF_BUILD_CMDS
 $(TARGET_MAKE_ENV) $(MAKE) -C $(@D)
 endef

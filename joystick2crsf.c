@@ -1683,7 +1683,6 @@ int main(int argc, char **argv)
 
         int fatal_error = 0;
         int restart_requested = 0;
-        int restart_sleep = 0;
         struct timespec retry_anchor;
         clock_gettime(CLOCK_MONOTONIC, &retry_anchor);
         struct timespec next_joystick_udp_retry = retry_anchor;
@@ -2268,11 +2267,6 @@ int main(int argc, char **argv)
         }
         if (!restart_requested) {
             break;
-        }
-        if (restart_sleep) {
-            fprintf(stderr, "Waiting 2 seconds before attempting to rediscover joystick...\n");
-            struct timespec delay = { .tv_sec = 2, .tv_nsec = 0 };
-            nanosleep(&delay, NULL);
         }
     }
 

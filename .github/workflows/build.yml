@@ -37,8 +37,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libsdl2-dev libcurl4-openssl-dev
+          sudo apt-get install -y --no-install-recommends build-essential
 
       - name: Build + stage install (Linux)
         if: matrix.kind == 'linux'
