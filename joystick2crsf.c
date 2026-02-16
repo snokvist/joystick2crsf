@@ -45,7 +45,9 @@
 
 /* ------------------------------------------------------------------------- */
 #define NS_PER_SEC         1000000000L
-#define SSE_INTERVAL_NS    100000000L             /* 10 Hz */
+#define SSE_DEFAULT_RATE_HZ 10
+#define SSE_MIN_RATE_HZ    1
+#define SSE_MAX_RATE_HZ    100
 
 #define CRSF_DEST          0xC8
 #define CRSF_TYPE_CHANNELS 0x16
@@ -104,6 +106,7 @@ typedef struct {
     int sse_enabled;
     char sse_bind[256];
     char sse_path[64];
+    int sse_rate_hz;
     int mavlink_sysid;
     int mavlink_compid;
     int mavlink_target_sysid;
@@ -138,11 +141,25 @@ typedef struct {
     size_t used;
 } serial_parser_t;
 
+typedef struct {
+    int valid;
+    uint16_t channels[16];
+    int32_t raw[16];
+} sse_joystick_latest_t;
+
+typedef struct {
+    int valid;
+    int mode;
+    size_t frame_len;
+    uint8_t frame[1024];
+} sse_serial_latest_t;
+
 /* ------------------------------------------------------------------------- */
 static volatile int g_run = 1;
 static volatile sig_atomic_t g_reload = 0;
 static void on_sigint(int sig){ (void)sig; g_run = 0; }
 static void on_sighup(int sig){ (void)sig; g_reload = 1; }
+static int sse_send_serial_frame(int fd, int mode, const uint8_t *frame, size_t frame_len);
 
 static void print_help(const char *prog, const char *conf_path, int startup)
 {
@@ -606,11 +623,30 @@ enum {
     SERIAL_FWD_SERIAL_ERROR = 1
 };
 
+static void sse_store_serial_latest(sse_serial_latest_t *latest,
+                                    int mode,
+                                    const uint8_t *frame,
+                                    size_t frame_len)
+{
+    if (!latest || !frame || frame_len == 0) {
+        return;
+    }
+    size_t stored = frame_len;
+    if (stored > sizeof(latest->frame)) {
+        stored = sizeof(latest->frame);
+    }
+    memcpy(latest->frame, frame, stored);
+    latest->frame_len = stored;
+    latest->mode = mode;
+    latest->valid = 1;
+}
+
 static int serial_forward_pending(int serial_fd,
                                   int udp_fd,
                                   const struct sockaddr_storage *udp_addr,
                                   socklen_t udp_addrlen,
                                   serial_parser_t *parser,
+                                  sse_serial_latest_t *sse_serial_latest,
                                   uint64_t *packets,
                                   uint64_t *bytes,
                                   uint64_t *send_drops)
@@ -625,6 +661,7 @@ static int serial_forward_pending(int serial_fd,
         ssize_t n = read(serial_fd, in_buf, sizeof(in_buf));
         if (n > 0) {
             if (parser->mode == SERIAL_PACKETIZER_RAW) {
+                sse_store_serial_latest(sse_serial_latest, parser->mode, in_buf, (size_t)n);
                 ssize_t sent = sendto(udp_fd, in_buf, (size_t)n, 0,
                                       (const struct sockaddr *)udp_addr, udp_addrlen);
                 if (sent < 0) {
@@ -654,6 +691,7 @@ static int serial_forward_pending(int serial_fd,
                 if (!serial_parser_extract_frame(parser, frame, &out_len)) {
                     break;
                 }
+                sse_store_serial_latest(sse_serial_latest, parser->mode, frame, out_len);
                 ssize_t sent = sendto(udp_fd, frame, out_len, 0,
                                       (const struct sockaddr *)udp_addr, udp_addrlen);
                 if (sent < 0) {
@@ -707,7 +745,10 @@ static int sse_send_all(int fd, const char *buf, size_t len)
             continue;
         }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return -1;
+            if (off == 0) {
+                return 1; /* no bytes sent; caller can retry/drop without stream corruption */
+            }
+            return -1; /* partial write would corrupt framing if dropped */
         }
         return -1;
     }
@@ -884,14 +925,88 @@ static int sse_accept_pending(int listen_fd, int *client_fd, const char *path)
     return 1;
 }
 
+static void unpack_crsf_channels_payload(const uint8_t payload[CRSF_PAYLOAD_LEN], uint16_t ch[16])
+{
+    uint32_t bit = 0;
+    for (int i = 0; i < 16; i++) {
+        uint32_t byte = bit >> 3;
+        uint32_t off = bit & 7U;
+        uint32_t v = (uint32_t)(payload[byte] >> off);
+        if (byte + 1 < CRSF_PAYLOAD_LEN) {
+            v |= (uint32_t)payload[byte + 1] << (8U - off);
+        }
+        if (off >= 6U && byte + 2 < CRSF_PAYLOAD_LEN) {
+            v |= (uint32_t)payload[byte + 2] << (16U - off);
+        }
+        ch[i] = (uint16_t)(v & 0x7FFU);
+        bit += 11U;
+    }
+}
+
+static size_t bytes_to_hex_preview(const uint8_t *in,
+                                   size_t in_len,
+                                   size_t max_bytes,
+                                   char *out,
+                                   size_t out_sz,
+                                   int *truncated)
+{
+    if (!in || !out || out_sz == 0) {
+        return 0;
+    }
+    size_t n = in_len;
+    int trunc = 0;
+    if (n > max_bytes) {
+        n = max_bytes;
+        trunc = 1;
+    }
+    size_t max_encodable = (out_sz - 1U) / 2U;
+    if (n > max_encodable) {
+        n = max_encodable;
+        trunc = 1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        (void)snprintf(out + (i * 2U), out_sz - (i * 2U), "%02X", in[i]);
+    }
+    out[n * 2U] = '\0';
+    if (truncated) {
+        *truncated = trunc;
+    }
+    return n;
+}
+
+static const char *serial_mode_name(int mode)
+{
+    switch (mode) {
+    case SERIAL_PACKETIZER_CRSF:
+        return "crsf";
+    case SERIAL_PACKETIZER_MAVLINK:
+        return "mavlink";
+    case SERIAL_PACKETIZER_RAW:
+    default:
+        return "raw";
+    }
+}
+
+static void sse_store_joystick_latest(sse_joystick_latest_t *latest,
+                                      const uint16_t ch[16],
+                                      const int32_t raw[16])
+{
+    if (!latest || !ch || !raw) {
+        return;
+    }
+    memcpy(latest->channels, ch, sizeof(latest->channels));
+    memcpy(latest->raw, raw, sizeof(latest->raw));
+    latest->valid = 1;
+}
+
 static int sse_send_frame(int fd, const uint16_t ch[16], const int32_t raw[16])
 {
     if (fd < 0) {
         return 0;
     }
 
-    char buf[512];
-    int off = snprintf(buf, sizeof(buf), "data: {\"channels\":[");
+    char buf[640];
+    int off = snprintf(buf, sizeof(buf), "event: joystick\ndata: {\"stream\":\"joystick\",\"channels\":[");
     if (off < 0 || off >= (int)sizeof(buf)) {
         return -1;
     }
@@ -922,10 +1037,69 @@ static int sse_send_frame(int fd, const uint16_t ch[16], const int32_t raw[16])
         return -1;
     }
 
-    if (sse_send_all(fd, buf, (size_t)off) < 0) {
+    int rc = sse_send_all(fd, buf, (size_t)off);
+    if (rc < 0) {
         return -1;
     }
-    return 0;
+    return rc;
+}
+
+static int sse_send_serial_frame(int fd, int mode, const uint8_t *frame, size_t frame_len)
+{
+    if (fd < 0 || !frame || frame_len == 0) {
+        return 0;
+    }
+
+    char hex[257];
+    int truncated = 0;
+    size_t shown = bytes_to_hex_preview(frame, frame_len, 128, hex, sizeof(hex), &truncated);
+
+    char buf[2048];
+    int off = snprintf(buf, sizeof(buf),
+                       "event: serial\ndata: {\"stream\":\"serial\",\"mode\":\"%s\","
+                       "\"len\":%zu,\"preview_len\":%zu,\"truncated\":%s,\"frame\":\"%s\"",
+                       serial_mode_name(mode),
+                       frame_len,
+                       shown,
+                       truncated ? "true" : "false",
+                       hex);
+    if (off < 0 || off >= (int)sizeof(buf)) {
+        return -1;
+    }
+
+    if (mode == SERIAL_PACKETIZER_CRSF &&
+        frame_len >= (size_t)(CRSF_FRAME_LEN + 2) &&
+        frame[1] == CRSF_FRAME_LEN &&
+        frame[2] == CRSF_TYPE_CHANNELS) {
+        uint16_t ch[16];
+        unpack_crsf_channels_payload(frame + 3, ch);
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off, ",\"channels\":[");
+        if (off < 0 || off >= (int)sizeof(buf)) {
+            return -1;
+        }
+        for (int i = 0; i < 16; i++) {
+            off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                            i ? ",%u" : "%u", (unsigned)ch[i]);
+            if (off < 0 || off >= (int)sizeof(buf)) {
+                return -1;
+            }
+        }
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off, "]");
+        if (off < 0 || off >= (int)sizeof(buf)) {
+            return -1;
+        }
+    }
+
+    off += snprintf(buf + off, sizeof(buf) - (size_t)off, "}\n\n");
+    if (off < 0 || off >= (int)sizeof(buf)) {
+        return -1;
+    }
+
+    int rc = sse_send_all(fd, buf, (size_t)off);
+    if (rc < 0) {
+        return -1;
+    }
+    return rc;
 }
 
 static void try_rt(int prio)
@@ -1204,6 +1378,7 @@ static void config_defaults(config_t *cfg)
     cfg->sse_enabled = 0;
     snprintf(cfg->sse_bind, sizeof(cfg->sse_bind), "%s", "127.0.0.1:8070");
     snprintf(cfg->sse_path, sizeof(cfg->sse_path), "%s", "/sse");
+    cfg->sse_rate_hz = SSE_DEFAULT_RATE_HZ;
     cfg->mavlink_sysid = 255;
     cfg->mavlink_compid = 190;
     cfg->mavlink_target_sysid = 1;
@@ -1315,6 +1490,8 @@ static int config_load(config_t *cfg, const char *path)
             snprintf(cfg->sse_bind, sizeof(cfg->sse_bind), "%s", val);
         } else if (!strcasecmp(key, "sse_path")) {
             snprintf(cfg->sse_path, sizeof(cfg->sse_path), "%s", val);
+        } else if (!strcasecmp(key, "sse_rate_hz")) {
+            cfg->sse_rate_hz = atoi(val);
         } else if (!strcasecmp(key, "arm_toggle")) {
             int ch = atoi(val);
             if (ch >= 1 && ch <= 16) {
@@ -1384,6 +1561,11 @@ static int config_load(config_t *cfg, const char *path)
         cfg->serial_packetizer != SERIAL_PACKETIZER_RAW) {
         fprintf(stderr, "%s: unknown serial_packetizer, defaulting to crsf\n", path);
         cfg->serial_packetizer = SERIAL_PACKETIZER_CRSF;
+    }
+    if (cfg->sse_rate_hz < SSE_MIN_RATE_HZ || cfg->sse_rate_hz > SSE_MAX_RATE_HZ) {
+        fprintf(stderr, "%s: sse_rate_hz must be %d-%d; defaulting to %d\n",
+                path, SSE_MIN_RATE_HZ, SSE_MAX_RATE_HZ, SSE_DEFAULT_RATE_HZ);
+        cfg->sse_rate_hz = SSE_DEFAULT_RATE_HZ;
     }
 
     if (cfg->mavlink_sysid < 0 || cfg->mavlink_sysid > 255) {
@@ -1850,7 +2032,11 @@ int main(int argc, char **argv)
         struct timespec next_rescan;
         clock_gettime(CLOCK_MONOTONIC, &next_rescan);
         struct timespec next_frame = next_rescan;
-        struct timespec next_sse_emit = timespec_add(next_rescan, 0, SSE_INTERVAL_NS);
+        long sse_interval_ns = NS_PER_SEC / (long)cfg.sse_rate_hz;
+        if (sse_interval_ns <= 0) {
+            sse_interval_ns = 1;
+        }
+        struct timespec next_sse_emit = timespec_add(next_rescan, 0, sse_interval_ns);
 
         const long frame_interval_ns = NS_PER_SEC / (long)cfg.rate;
 
@@ -1866,6 +2052,7 @@ int main(int argc, char **argv)
         uint64_t serial_udp_bytes = 0;
         uint64_t serial_udp_send_drops = 0;
         uint64_t sse_packets = 0;
+        uint64_t sse_send_drops = 0;
 
         struct timespec stats_window_start = next_rescan;
         struct timespec last_loop = next_rescan;
@@ -1873,6 +2060,10 @@ int main(int argc, char **argv)
         uint8_t frame[FRAME_BUFFER_MAX];
         size_t frame_len = 0;
         uint8_t mavlink_seq = 0;
+        sse_joystick_latest_t sse_joystick_latest;
+        memset(&sse_joystick_latest, 0, sizeof(sse_joystick_latest));
+        sse_serial_latest_t sse_serial_latest;
+        memset(&sse_serial_latest, 0, sizeof(sse_serial_latest));
 
         if (cfg.protocol == PROTOCOL_CRSF) {
             frame[0] = CRSF_DEST;
@@ -1957,6 +2148,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, "Joystick disconnected.\n");
                     close(js_device.fd);
                     js_device.fd = -1;
+                    sse_joystick_latest.valid = 0;
                     next_rescan = now;
                 }
 
@@ -1966,6 +2158,7 @@ int main(int argc, char **argv)
                                                            &serial_udp_addr,
                                                            serial_udp_addrlen,
                                                            &serial_parser,
+                                                           &sse_serial_latest,
                                                            &serial_udp_packets,
                                                            &serial_udp_bytes,
                                                            &serial_udp_send_drops);
@@ -1974,6 +2167,7 @@ int main(int argc, char **argv)
                         close(serial_fd);
                         serial_fd = -1;
                         serial_parser_reset(&serial_parser, cfg.serial_packetizer);
+                        sse_serial_latest.valid = 0;
                         next_serial_retry = timespec_add(now, cfg.rescan_interval, 0);
                     }
                 }
@@ -1983,6 +2177,7 @@ int main(int argc, char **argv)
                     close(serial_fd);
                     serial_fd = -1;
                     serial_parser_reset(&serial_parser, cfg.serial_packetizer);
+                    sse_serial_latest.valid = 0;
                     next_serial_retry = timespec_add(now, cfg.rescan_interval, 0);
                 }
             }
@@ -2009,6 +2204,13 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Configuration reload requested; restarting.\n");
                 restart_requested = 1;
                 break;
+            }
+
+            if (cfg.sse_enabled && sse_fd >= 0) {
+                int accepted = sse_accept_pending(sse_fd, &sse_client_fd, cfg.sse_path);
+                if (accepted > 0) {
+                    next_sse_emit = now;
+                }
             }
 
             if (cfg.udp_enabled &&
@@ -2061,90 +2263,113 @@ int main(int argc, char **argv)
                 next_rescan = timespec_add(now, cfg.rescan_interval, 0);
             }
 
-            if (js_device.fd < 0) {
-                /* No device, sleep a bit or just loop */
+            uint16_t ch_out[16];
+            int32_t raw_out[16];
+            int have_joystick_frame = 0;
+            if (js_device.fd >= 0) {
+                uint16_t ch_source[16];
+                int32_t raw_source[16];
+                build_channels(&js_device, cfg.dead, ch_source, raw_source);
+
+                for (int i = 0; i < 16; i++) {
+                    int src = cfg.map[i];
+                    if (src < 0 || src >= 16) {
+                        src = i;
+                    }
+                    uint16_t v = ch_source[src];
+                    if (cfg.invert[i]) {
+                        v = (uint16_t)(CRSF_MIN + CRSF_MAX - v);
+                    }
+                    ch_out[i] = v;
+                    raw_out[i] = raw_source[src];
+                }
+
+                if (arm_channel >= 0) {
+                    int src = cfg.map[arm_channel];
+                    if (src < 0 || src >= 16) {
+                        src = arm_channel;
+                    }
+                    uint16_t arm_input = ch_source[src];
+                    int arm_high = arm_input > 1709;
+                    if (arm_high) {
+                        if (!arm_press_active) {
+                            arm_press_start = now;
+                            arm_press_active = 1;
+                        } else if (!arm_sticky) {
+                            int64_t held = timespec_diff_ms(&arm_press_start, &now);
+                            if (held >= 1000) {
+                                arm_sticky = 1;
+                            }
+                        }
+                    } else if (arm_press_active) {
+                        int64_t held = timespec_diff_ms(&arm_press_start, &now);
+                        if (arm_sticky && held < 1000) {
+                            arm_sticky = 0;
+                        }
+                        arm_press_active = 0;
+                    }
+
+                    uint16_t arm_high_value = cfg.invert[arm_channel] ? CRSF_MIN : CRSF_MAX;
+                    uint16_t arm_low_value = cfg.invert[arm_channel] ? CRSF_MAX : CRSF_MIN;
+                    if (arm_sticky || arm_high) {
+                        ch_out[arm_channel] = arm_high_value;
+                        raw_out[arm_channel] = 1;
+                    } else {
+                        ch_out[arm_channel] = arm_low_value;
+                        raw_out[arm_channel] = 0;
+                    }
+                }
+
+                sse_store_joystick_latest(&sse_joystick_latest, ch_out, raw_out);
+                have_joystick_frame = 1;
+            }
+
+            if (cfg.sse_enabled && sse_fd >= 0 &&
+                sse_client_fd >= 0 &&
+                timespec_cmp(&now, &next_sse_emit) >= 0) {
+                next_sse_emit = timespec_add(now, 0, sse_interval_ns);
+
+                if (sse_joystick_latest.valid) {
+                    int sse_rc = sse_send_frame(sse_client_fd,
+                                                sse_joystick_latest.channels,
+                                                sse_joystick_latest.raw);
+                    if (sse_rc < 0) {
+                        fprintf(stderr, "SSE client disconnected\n");
+                        close(sse_client_fd);
+                        sse_client_fd = -1;
+                    } else if (sse_rc == 0) {
+                        sse_packets++;
+                    } else {
+                        sse_send_drops++;
+                    }
+                }
+                if (sse_client_fd >= 0 && sse_serial_latest.valid) {
+                    int sse_rc = sse_send_serial_frame(sse_client_fd,
+                                                       sse_serial_latest.mode,
+                                                       sse_serial_latest.frame,
+                                                       sse_serial_latest.frame_len);
+                    if (sse_rc < 0) {
+                        fprintf(stderr, "SSE client disconnected\n");
+                        close(sse_client_fd);
+                        sse_client_fd = -1;
+                    } else if (sse_rc == 0) {
+                        sse_packets++;
+                    } else {
+                        sse_send_drops++;
+                    }
+                }
+            }
+
+            if (!have_joystick_frame) {
                 if (timespec_cmp(&now, &next_frame) >= 0) {
-                   do {
+                    do {
                         next_frame = timespec_add(next_frame, 0, frame_interval_ns);
                     } while (timespec_cmp(&now, &next_frame) >= 0);
                 }
                 continue;
             }
 
-            uint16_t ch_source[16];
-            int32_t raw_source[16];
-            build_channels(&js_device, cfg.dead, ch_source, raw_source);
-
-            uint16_t ch_out[16];
-            int32_t raw_out[16];
-            for (int i = 0; i < 16; i++) {
-                int src = cfg.map[i];
-                if (src < 0 || src >= 16) {
-                    src = i;
-                }
-                uint16_t v = ch_source[src];
-                if (cfg.invert[i]) {
-                    v = (uint16_t)(CRSF_MIN + CRSF_MAX - v);
-                }
-                ch_out[i] = v;
-                raw_out[i] = raw_source[src];
-            }
-
-            if (arm_channel >= 0) {
-                int src = cfg.map[arm_channel];
-                if (src < 0 || src >= 16) {
-                    src = arm_channel;
-                }
-                uint16_t arm_input = ch_source[src];
-                int arm_high = arm_input > 1709;
-                if (arm_high) {
-                    if (!arm_press_active) {
-                        arm_press_start = now;
-                        arm_press_active = 1;
-                    } else if (!arm_sticky) {
-                        int64_t held = timespec_diff_ms(&arm_press_start, &now);
-                        if (held >= 1000) {
-                            arm_sticky = 1;
-                        }
-                    }
-                } else if (arm_press_active) {
-                    int64_t held = timespec_diff_ms(&arm_press_start, &now);
-                    if (arm_sticky && held < 1000) {
-                        arm_sticky = 0;
-                    }
-                    arm_press_active = 0;
-                }
-
-                uint16_t arm_high_value = cfg.invert[arm_channel] ? CRSF_MIN : CRSF_MAX;
-                uint16_t arm_low_value = cfg.invert[arm_channel] ? CRSF_MAX : CRSF_MIN;
-                if (arm_sticky || arm_high) {
-                    ch_out[arm_channel] = arm_high_value;
-                    raw_out[arm_channel] = 1;
-                } else {
-                    ch_out[arm_channel] = arm_low_value;
-                    raw_out[arm_channel] = 0;
-                }
-            }
-
             int ready_for_frame = (timespec_cmp(&now, &next_frame) >= 0);
-
-            if (cfg.sse_enabled && sse_fd >= 0) {
-                int accepted = sse_accept_pending(sse_fd, &sse_client_fd, cfg.sse_path);
-                if (accepted > 0) {
-                    next_sse_emit = now;
-                }
-                if (sse_client_fd >= 0 && timespec_cmp(&now, &next_sse_emit) >= 0) {
-                    if (sse_send_frame(sse_client_fd, ch_out, raw_out) < 0) {
-                        fprintf(stderr, "SSE client disconnected\n");
-                        close(sse_client_fd);
-                        sse_client_fd = -1;
-                    } else {
-                        next_sse_emit = timespec_add(now, 0, SSE_INTERVAL_NS);
-                        sse_packets++;
-                    }
-                }
-            }
-
             if (ready_for_frame) {
                 if (cfg.protocol == PROTOCOL_CRSF) {
                     pack_channels(ch_out, frame + 3);
@@ -2223,6 +2448,10 @@ int main(int argc, char **argv)
                         if (cfg.sse_enabled && sse_fd >= 0) {
                             printf("  sse %llu/s",
                                    (unsigned long long)sse_packets);
+                            if (sse_send_drops > 0) {
+                                printf(" drop %llu/s",
+                                       (unsigned long long)sse_send_drops);
+                            }
                         }
                         putchar('\n');
                         t_min = 1e9;
@@ -2241,6 +2470,7 @@ int main(int argc, char **argv)
                         serial_udp_bytes = 0;
                         serial_udp_send_drops = 0;
                         sse_packets = 0;
+                        sse_send_drops = 0;
                         stats_window_start = now;
                     }
                 }
