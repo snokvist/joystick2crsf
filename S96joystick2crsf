@@ -1,16 +1,17 @@
 #!/bin/sh
 # Simple control script for joystick2crsf (no start-stop-daemon, no PID files)
 
-DAEMON="joystick2crsf"
+DAEMON="/usr/bin/joystick2crsf"
+DAEMON_NAME="joystick2crsf"
 DAEMON_CONF="/etc/joystick2crsf.conf"
 
 # Try to find PIDs using pidof, fall back to pgrep
 get_pids() {
     if command -v pidof >/dev/null 2>&1; then
-        pidof "$DAEMON"
+        pidof "$DAEMON_NAME"
     else
         # -x to match scripts, -f to match full cmdline if needed
-        pgrep -x "$DAEMON" || pgrep -f "^$DAEMON[ ]"
+        pgrep -x "$DAEMON_NAME" || pgrep -f "^$DAEMON([ ]|$)"
     fi
 }
 
