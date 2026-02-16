@@ -103,6 +103,8 @@ serial_packetizer=crsf
 
 You can run joystick output and serial passthrough at the same time with different UDP targets
 (for example `udp_target=...:14550` and `serial_udp_target=...:14551`).
+When SSE is enabled, joystick and serial data are published as separate SSE events
+(`event: joystick` and `event: serial`) with a `stream` field in the JSON payload.
 
 Note: action-key hooks have been removed. Existing `action_*` and related action
 configuration lines are ignored by current builds and should be deleted from local configs.

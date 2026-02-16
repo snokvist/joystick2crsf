@@ -143,6 +143,7 @@ static volatile int g_run = 1;
 static volatile sig_atomic_t g_reload = 0;
 static void on_sigint(int sig){ (void)sig; g_run = 0; }
 static void on_sighup(int sig){ (void)sig; g_reload = 1; }
+static int sse_send_serial_frame(int fd, int mode, const uint8_t *frame, size_t frame_len);
 
 static void print_help(const char *prog, const char *conf_path, int startup)
 {
@@ -611,8 +612,10 @@ static int serial_forward_pending(int serial_fd,
                                   const struct sockaddr_storage *udp_addr,
                                   socklen_t udp_addrlen,
                                   serial_parser_t *parser,
+                                  int *sse_client_fd,
                                   uint64_t *packets,
                                   uint64_t *bytes,
+                                  uint64_t *sse_packets,
                                   uint64_t *send_drops)
 {
     if (serial_fd < 0 || udp_fd < 0 || !udp_addr || udp_addrlen == 0 || !parser) {
@@ -625,6 +628,15 @@ static int serial_forward_pending(int serial_fd,
         ssize_t n = read(serial_fd, in_buf, sizeof(in_buf));
         if (n > 0) {
             if (parser->mode == SERIAL_PACKETIZER_RAW) {
+                if (sse_client_fd && *sse_client_fd >= 0) {
+                    if (sse_send_serial_frame(*sse_client_fd, parser->mode, in_buf, (size_t)n) < 0) {
+                        fprintf(stderr, "SSE client disconnected\n");
+                        close(*sse_client_fd);
+                        *sse_client_fd = -1;
+                    } else if (sse_packets) {
+                        (*sse_packets)++;
+                    }
+                }
                 ssize_t sent = sendto(udp_fd, in_buf, (size_t)n, 0,
                                       (const struct sockaddr *)udp_addr, udp_addrlen);
                 if (sent < 0) {
@@ -653,6 +665,15 @@ static int serial_forward_pending(int serial_fd,
                 size_t out_len = 0;
                 if (!serial_parser_extract_frame(parser, frame, &out_len)) {
                     break;
+                }
+                if (sse_client_fd && *sse_client_fd >= 0) {
+                    if (sse_send_serial_frame(*sse_client_fd, parser->mode, frame, out_len) < 0) {
+                        fprintf(stderr, "SSE client disconnected\n");
+                        close(*sse_client_fd);
+                        *sse_client_fd = -1;
+                    } else if (sse_packets) {
+                        (*sse_packets)++;
+                    }
                 }
                 ssize_t sent = sendto(udp_fd, frame, out_len, 0,
                                       (const struct sockaddr *)udp_addr, udp_addrlen);
@@ -884,14 +905,76 @@ static int sse_accept_pending(int listen_fd, int *client_fd, const char *path)
     return 1;
 }
 
+static void unpack_crsf_channels_payload(const uint8_t payload[CRSF_PAYLOAD_LEN], uint16_t ch[16])
+{
+    uint32_t bit = 0;
+    for (int i = 0; i < 16; i++) {
+        uint32_t byte = bit >> 3;
+        uint32_t off = bit & 7U;
+        uint32_t v = (uint32_t)(payload[byte] >> off);
+        if (byte + 1 < CRSF_PAYLOAD_LEN) {
+            v |= (uint32_t)payload[byte + 1] << (8U - off);
+        }
+        if (off >= 6U && byte + 2 < CRSF_PAYLOAD_LEN) {
+            v |= (uint32_t)payload[byte + 2] << (16U - off);
+        }
+        ch[i] = (uint16_t)(v & 0x7FFU);
+        bit += 11U;
+    }
+}
+
+static size_t bytes_to_hex_preview(const uint8_t *in,
+                                   size_t in_len,
+                                   size_t max_bytes,
+                                   char *out,
+                                   size_t out_sz,
+                                   int *truncated)
+{
+    if (!in || !out || out_sz == 0) {
+        return 0;
+    }
+    size_t n = in_len;
+    int trunc = 0;
+    if (n > max_bytes) {
+        n = max_bytes;
+        trunc = 1;
+    }
+    size_t max_encodable = (out_sz - 1U) / 2U;
+    if (n > max_encodable) {
+        n = max_encodable;
+        trunc = 1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        (void)snprintf(out + (i * 2U), out_sz - (i * 2U), "%02X", in[i]);
+    }
+    out[n * 2U] = '\0';
+    if (truncated) {
+        *truncated = trunc;
+    }
+    return n;
+}
+
+static const char *serial_mode_name(int mode)
+{
+    switch (mode) {
+    case SERIAL_PACKETIZER_CRSF:
+        return "crsf";
+    case SERIAL_PACKETIZER_MAVLINK:
+        return "mavlink";
+    case SERIAL_PACKETIZER_RAW:
+    default:
+        return "raw";
+    }
+}
+
 static int sse_send_frame(int fd, const uint16_t ch[16], const int32_t raw[16])
 {
     if (fd < 0) {
         return 0;
     }
 
-    char buf[512];
-    int off = snprintf(buf, sizeof(buf), "data: {\"channels\":[");
+    char buf[640];
+    int off = snprintf(buf, sizeof(buf), "event: joystick\ndata: {\"stream\":\"joystick\",\"channels\":[");
     if (off < 0 || off >= (int)sizeof(buf)) {
         return -1;
     }
@@ -918,6 +1001,63 @@ static int sse_send_frame(int fd, const uint16_t ch[16], const int32_t raw[16])
     }
 
     off += snprintf(buf + off, sizeof(buf) - (size_t)off, "]}\n\n");
+    if (off < 0 || off >= (int)sizeof(buf)) {
+        return -1;
+    }
+
+    if (sse_send_all(fd, buf, (size_t)off) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int sse_send_serial_frame(int fd, int mode, const uint8_t *frame, size_t frame_len)
+{
+    if (fd < 0 || !frame || frame_len == 0) {
+        return 0;
+    }
+
+    char hex[257];
+    int truncated = 0;
+    size_t shown = bytes_to_hex_preview(frame, frame_len, 128, hex, sizeof(hex), &truncated);
+
+    char buf[2048];
+    int off = snprintf(buf, sizeof(buf),
+                       "event: serial\ndata: {\"stream\":\"serial\",\"mode\":\"%s\","
+                       "\"len\":%zu,\"preview_len\":%zu,\"truncated\":%s,\"frame\":\"%s\"",
+                       serial_mode_name(mode),
+                       frame_len,
+                       shown,
+                       truncated ? "true" : "false",
+                       hex);
+    if (off < 0 || off >= (int)sizeof(buf)) {
+        return -1;
+    }
+
+    if (mode == SERIAL_PACKETIZER_CRSF &&
+        frame_len >= (size_t)(CRSF_FRAME_LEN + 2) &&
+        frame[1] == CRSF_FRAME_LEN &&
+        frame[2] == CRSF_TYPE_CHANNELS) {
+        uint16_t ch[16];
+        unpack_crsf_channels_payload(frame + 3, ch);
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off, ",\"channels\":[");
+        if (off < 0 || off >= (int)sizeof(buf)) {
+            return -1;
+        }
+        for (int i = 0; i < 16; i++) {
+            off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                            i ? ",%u" : "%u", (unsigned)ch[i]);
+            if (off < 0 || off >= (int)sizeof(buf)) {
+                return -1;
+            }
+        }
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off, "]");
+        if (off < 0 || off >= (int)sizeof(buf)) {
+            return -1;
+        }
+    }
+
+    off += snprintf(buf + off, sizeof(buf) - (size_t)off, "}\n\n");
     if (off < 0 || off >= (int)sizeof(buf)) {
         return -1;
     }
@@ -1966,8 +2106,10 @@ int main(int argc, char **argv)
                                                            &serial_udp_addr,
                                                            serial_udp_addrlen,
                                                            &serial_parser,
+                                                           &sse_client_fd,
                                                            &serial_udp_packets,
                                                            &serial_udp_bytes,
+                                                           &sse_packets,
                                                            &serial_udp_send_drops);
                     if (serial_rc == SERIAL_FWD_SERIAL_ERROR) {
                         fprintf(stderr, "Serial passthrough read failed; reconnecting.\n");
@@ -2009,6 +2151,13 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Configuration reload requested; restarting.\n");
                 restart_requested = 1;
                 break;
+            }
+
+            if (cfg.sse_enabled && sse_fd >= 0) {
+                int accepted = sse_accept_pending(sse_fd, &sse_client_fd, cfg.sse_path);
+                if (accepted > 0) {
+                    next_sse_emit = now;
+                }
             }
 
             if (cfg.udp_enabled &&
@@ -2128,20 +2277,16 @@ int main(int argc, char **argv)
 
             int ready_for_frame = (timespec_cmp(&now, &next_frame) >= 0);
 
-            if (cfg.sse_enabled && sse_fd >= 0) {
-                int accepted = sse_accept_pending(sse_fd, &sse_client_fd, cfg.sse_path);
-                if (accepted > 0) {
-                    next_sse_emit = now;
-                }
-                if (sse_client_fd >= 0 && timespec_cmp(&now, &next_sse_emit) >= 0) {
-                    if (sse_send_frame(sse_client_fd, ch_out, raw_out) < 0) {
-                        fprintf(stderr, "SSE client disconnected\n");
-                        close(sse_client_fd);
-                        sse_client_fd = -1;
-                    } else {
-                        next_sse_emit = timespec_add(now, 0, SSE_INTERVAL_NS);
-                        sse_packets++;
-                    }
+            if (cfg.sse_enabled && sse_fd >= 0 &&
+                sse_client_fd >= 0 &&
+                timespec_cmp(&now, &next_sse_emit) >= 0) {
+                if (sse_send_frame(sse_client_fd, ch_out, raw_out) < 0) {
+                    fprintf(stderr, "SSE client disconnected\n");
+                    close(sse_client_fd);
+                    sse_client_fd = -1;
+                } else {
+                    next_sse_emit = timespec_add(now, 0, SSE_INTERVAL_NS);
+                    sse_packets++;
                 }
             }
 
