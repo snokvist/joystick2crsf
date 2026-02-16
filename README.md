@@ -78,6 +78,8 @@ delay. Channels use CRSF scaling where 1811 is max and 172 is min.
 
 Device and UDP reconnect attempts use `rescan_interval` seconds (default `10`), so if a joystick,
 serial device, or UDP target is temporarily unavailable, the process keeps running and retries.
+UDP sends are connectionless; if routing/peer availability flaps, packets are still attempted each
+cycle and temporary send failures are dropped.
 
 ## Serial passthrough mode
 

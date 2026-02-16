@@ -144,6 +144,18 @@ static volatile sig_atomic_t g_reload = 0;
 static void on_sigint(int sig){ (void)sig; g_run = 0; }
 static void on_sighup(int sig){ (void)sig; g_reload = 1; }
 
+static void print_help(const char *prog, const char *conf_path, int startup)
+{
+    const char *name = (prog && prog[0]) ? prog : "joystick2crsf";
+    const char *cfg = (conf_path && conf_path[0]) ? conf_path : DEFAULT_CONF;
+    if (startup) {
+        fprintf(stderr, "Starting %s\n", name);
+    }
+    fprintf(stderr, "Usage: %s [config_path]\n", name);
+    fprintf(stderr, "Config file: %s\n", cfg);
+    fprintf(stderr, "Reload config with SIGHUP; stop with SIGINT (Ctrl+C).\n");
+}
+
 /* ------------------------------------------------------------------------- */
 static const uint8_t crc8_table[256] = {
 0x00, 0xD5, 0x7F, 0xAA, 0xFE, 0x2B, 0x81, 0x54, 0x29, 0xFC, 0x56, 0x83, 0xD7, 0x02, 0xA8, 0x7D,
@@ -591,8 +603,7 @@ static int serial_parser_extract_frame(serial_parser_t *p, uint8_t *frame, size_
 
 enum {
     SERIAL_FWD_OK = 0,
-    SERIAL_FWD_SERIAL_ERROR = 1,
-    SERIAL_FWD_UDP_ERROR = 2
+    SERIAL_FWD_SERIAL_ERROR = 1
 };
 
 static int serial_forward_pending(int serial_fd,
@@ -601,7 +612,8 @@ static int serial_forward_pending(int serial_fd,
                                   socklen_t udp_addrlen,
                                   serial_parser_t *parser,
                                   uint64_t *packets,
-                                  uint64_t *bytes)
+                                  uint64_t *bytes,
+                                  uint64_t *send_drops)
 {
     if (serial_fd < 0 || udp_fd < 0 || !udp_addr || udp_addrlen == 0 || !parser) {
         return SERIAL_FWD_OK;
@@ -616,15 +628,16 @@ static int serial_forward_pending(int serial_fd,
                 ssize_t sent = sendto(udp_fd, in_buf, (size_t)n, 0,
                                       (const struct sockaddr *)udp_addr, udp_addrlen);
                 if (sent < 0) {
-                    if (errno == EINTR) {
-                        continue;
+                    if (send_drops) {
+                        (*send_drops)++;
                     }
-                    perror("serial udp send");
-                    return SERIAL_FWD_UDP_ERROR;
+                    continue;
                 }
                 if ((size_t)sent != (size_t)n) {
-                    fprintf(stderr, "serial udp send short write: %zd of %zd bytes\n", sent, n);
-                    return SERIAL_FWD_UDP_ERROR;
+                    if (send_drops) {
+                        (*send_drops)++;
+                    }
+                    continue;
                 }
                 if (packets) {
                     (*packets)++;
@@ -644,15 +657,16 @@ static int serial_forward_pending(int serial_fd,
                 ssize_t sent = sendto(udp_fd, frame, out_len, 0,
                                       (const struct sockaddr *)udp_addr, udp_addrlen);
                 if (sent < 0) {
-                    if (errno == EINTR) {
-                        continue;
+                    if (send_drops) {
+                        (*send_drops)++;
                     }
-                    perror("serial udp send");
-                    return SERIAL_FWD_UDP_ERROR;
+                    continue;
                 }
                 if ((size_t)sent != out_len) {
-                    fprintf(stderr, "serial udp send short write: %zd of %zu bytes\n", sent, out_len);
-                    return SERIAL_FWD_UDP_ERROR;
+                    if (send_drops) {
+                        (*send_drops)++;
+                    }
+                    continue;
                 }
                 if (packets) {
                     (*packets)++;
@@ -1615,13 +1629,19 @@ static void read_joystick_events(joystick_t *js)
 int main(int argc, char **argv)
 {
     const char *conf_path = DEFAULT_CONF;
+    if (argc >= 2 &&
+        (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+        print_help(argv[0], conf_path, 0);
+        return 0;
+    }
     if (argc > 2) {
-        fprintf(stderr, "Usage: %s [config_path]\n", argv[0]);
+        print_help(argv[0], conf_path, 0);
         return 1;
     }
     if (argc == 2) {
         conf_path = argv[1];
     }
+    print_help(argv[0], conf_path, 1);
 
     signal(SIGINT, on_sigint);
     signal(SIGHUP, on_sighup);
@@ -1841,8 +1861,10 @@ int main(int argc, char **argv)
         uint64_t wake_events = 0;
         uint64_t wake_timeouts = 0;
         uint64_t udp_packets = 0;
+        uint64_t udp_send_drops = 0;
         uint64_t serial_udp_packets = 0;
         uint64_t serial_udp_bytes = 0;
+        uint64_t serial_udp_send_drops = 0;
         uint64_t sse_packets = 0;
 
         struct timespec stats_window_start = next_rescan;
@@ -1945,24 +1967,12 @@ int main(int argc, char **argv)
                                                            serial_udp_addrlen,
                                                            &serial_parser,
                                                            &serial_udp_packets,
-                                                           &serial_udp_bytes);
+                                                           &serial_udp_bytes,
+                                                           &serial_udp_send_drops);
                     if (serial_rc == SERIAL_FWD_SERIAL_ERROR) {
                         fprintf(stderr, "Serial passthrough read failed; reconnecting.\n");
                         close(serial_fd);
                         serial_fd = -1;
-                        serial_parser_reset(&serial_parser, cfg.serial_packetizer);
-                        next_serial_retry = timespec_add(now, cfg.rescan_interval, 0);
-                    } else if (serial_rc == SERIAL_FWD_UDP_ERROR) {
-                        fprintf(stderr, "Serial UDP output failed; reconnecting UDP target.\n");
-                        if (serial_udp_fd >= 0) {
-                            close(serial_udp_fd);
-                            serial_udp_fd = -1;
-                        }
-                        next_serial_udp_retry = timespec_add(now, cfg.rescan_interval, 0);
-                        if (serial_fd >= 0) {
-                            close(serial_fd);
-                            serial_fd = -1;
-                        }
                         serial_parser_reset(&serial_parser, cfg.serial_packetizer);
                         next_serial_retry = timespec_add(now, cfg.rescan_interval, 0);
                     }
@@ -2009,7 +2019,7 @@ int main(int argc, char **argv)
                                                   &joystick_udp_addr,
                                                   &joystick_udp_addrlen);
                 if (joystick_udp_fd >= 0) {
-                    fprintf(stderr, "UDP target connected: %s\n", cfg.udp_target);
+                    fprintf(stderr, "UDP target ready: %s\n", cfg.udp_target);
                 }
                 next_joystick_udp_retry = timespec_add(now, cfg.rescan_interval, 0);
             }
@@ -2022,7 +2032,7 @@ int main(int argc, char **argv)
                                                 &serial_udp_addr,
                                                 &serial_udp_addrlen);
                 if (serial_udp_fd >= 0) {
-                    fprintf(stderr, "Serial UDP target connected: %s\n",
+                    fprintf(stderr, "Serial UDP target ready: %s\n",
                             cfg.serial_udp_target);
                 }
                 next_serial_udp_retry = timespec_add(now, cfg.rescan_interval, 0);
@@ -2161,14 +2171,11 @@ int main(int argc, char **argv)
                                           (struct sockaddr *)&joystick_udp_addr,
                                           joystick_udp_addrlen);
                     if (sent < 0) {
-                        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-                            perror("udp send");
-                            close(joystick_udp_fd);
-                            joystick_udp_fd = -1;
-                            next_joystick_udp_retry = timespec_add(now, cfg.rescan_interval, 0);
-                        }
-                    } else {
+                        udp_send_drops++;
+                    } else if ((size_t)sent == frame_len) {
                         udp_packets++;
+                    } else {
+                        udp_send_drops++;
                     }
                 }
             }
@@ -2199,11 +2206,19 @@ int main(int argc, char **argv)
                         if (joystick_udp_fd >= 0) {
                             printf("  udp %llu/s",
                                    (unsigned long long)udp_packets);
+                            if (udp_send_drops > 0) {
+                                printf(" drop %llu/s",
+                                       (unsigned long long)udp_send_drops);
+                            }
                         }
                         if (serial_udp_fd >= 0) {
                             printf("  serial_udp %llu pkt/s %llu B/s",
                                    (unsigned long long)serial_udp_packets,
                                    (unsigned long long)serial_udp_bytes);
+                            if (serial_udp_send_drops > 0) {
+                                printf(" drop %llu/s",
+                                       (unsigned long long)serial_udp_send_drops);
+                            }
                         }
                         if (cfg.sse_enabled && sse_fd >= 0) {
                             printf("  sse %llu/s",
@@ -2221,8 +2236,10 @@ int main(int argc, char **argv)
                         wake_events = 0;
                         wake_timeouts = 0;
                         udp_packets = 0;
+                        udp_send_drops = 0;
                         serial_udp_packets = 0;
                         serial_udp_bytes = 0;
+                        serial_udp_send_drops = 0;
                         sse_packets = 0;
                         stats_window_start = now;
                     }
