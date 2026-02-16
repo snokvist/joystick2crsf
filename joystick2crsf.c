@@ -1875,16 +1875,19 @@ int main(int argc, char **argv)
             }
             if (cfg.udp_enabled &&
                 joystick_udp_fd < 0 &&
+                cfg.udp_target[0] != '\0' &&
                 timespec_cmp(&next_joystick_udp_retry, &deadline) < 0) {
                 deadline = next_joystick_udp_retry;
             }
             if (cfg.serial_udp_enabled &&
                 serial_udp_fd < 0 &&
+                cfg.serial_udp_target[0] != '\0' &&
                 timespec_cmp(&next_serial_udp_retry, &deadline) < 0) {
                 deadline = next_serial_udp_retry;
             }
             if (cfg.serial_enabled &&
                 serial_fd < 0 &&
+                serial_udp_fd >= 0 &&
                 timespec_cmp(&next_serial_retry, &deadline) < 0) {
                 deadline = next_serial_retry;
             }
