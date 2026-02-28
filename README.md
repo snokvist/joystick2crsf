@@ -138,7 +138,9 @@ sse_rate_hz=10
 
 When enabled, joystick and serial data are published as separate SSE events
 (`event: joystick` and `event: serial`) with a `stream` field in each JSON payload.
-Each stream emits the latest available frame at the configured rate.
+The joystick stream emits the latest available frame at the configured rate.
+The serial stream emits the latest available frame at the configured rate while serial data is
+active, then stops after about 1 second of UART silence.
 
 Quick test:
 
