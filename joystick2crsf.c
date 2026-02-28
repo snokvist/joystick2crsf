@@ -48,6 +48,8 @@
 #define SSE_DEFAULT_RATE_HZ 10
 #define SSE_MIN_RATE_HZ    1
 #define SSE_MAX_RATE_HZ    100
+#define SSE_HANDSHAKE_TIMEOUT_SEC 2
+#define SSE_SERIAL_STALE_TIMEOUT_MS 1000
 
 #define CRSF_DEST          0xC8
 #define CRSF_TYPE_CHANNELS 0x16
@@ -151,15 +153,31 @@ typedef struct {
     int valid;
     int mode;
     size_t frame_len;
+    struct timespec updated_at;
     uint8_t frame[1024];
 } sse_serial_latest_t;
 
+typedef struct {
+    int fd;
+    size_t request_used;
+    size_t response_len;
+    size_t response_off;
+    int accepted;
+    struct timespec deadline;
+    char request[1024];
+    char response[256];
+} sse_pending_client_t;
+
 /* ------------------------------------------------------------------------- */
-static volatile int g_run = 1;
+static volatile sig_atomic_t g_run = 1;
 static volatile sig_atomic_t g_reload = 0;
 static void on_sigint(int sig){ (void)sig; g_run = 0; }
 static void on_sighup(int sig){ (void)sig; g_reload = 1; }
 static int sse_send_serial_frame(int fd, int mode, const uint8_t *frame, size_t frame_len);
+static int rate_supported(int rate);
+static int config_load(config_t *cfg, const char *path);
+static int timespec_cmp(const struct timespec *a, const struct timespec *b);
+static struct timespec timespec_add(struct timespec ts, int sec, long nsec);
 
 static void print_help(const char *prog, const char *conf_path, int startup)
 {
@@ -307,19 +325,15 @@ static size_t pack_mavlink_rc_override(const config_t *cfg, const uint16_t ch[16
     out[9] = (uint8_t)((MAVLINK_MSG_RC_OVERRIDE >> 16) & 0xFFU);
 
     size_t off = MAVLINK_HDR_LEN;
-    out[off++] = (uint8_t)cfg->mavlink_target_sysid;
-    out[off++] = (uint8_t)cfg->mavlink_target_compid;
-
     for (int i = 0; i < 8; i++) {
         uint16_t mv = crsf_to_mavlink(ch[i]);
         out[off++] = (uint8_t)(mv & 0xFFU);
         out[off++] = (uint8_t)(mv >> 8); /* little endian */
     }
+    out[off++] = (uint8_t)cfg->mavlink_target_sysid;
+    out[off++] = (uint8_t)cfg->mavlink_target_compid;
 
-    uint16_t crc = crc_x25(out + MAVLINK_HDR_LEN, MAVLINK_PAYLOAD_LEN);
-    crc = crc_x25_byte(crc, (uint8_t)(MAVLINK_MSG_RC_OVERRIDE & 0xFFU));
-    crc = crc_x25_byte(crc, (uint8_t)((MAVLINK_MSG_RC_OVERRIDE >> 8) & 0xFFU));
-    crc = crc_x25_byte(crc, (uint8_t)((MAVLINK_MSG_RC_OVERRIDE >> 16) & 0xFFU));
+    uint16_t crc = crc_x25(out + 1, (MAVLINK_HDR_LEN - 1U) + MAVLINK_PAYLOAD_LEN);
     crc = crc_x25_byte(crc, MAVLINK_RC_CRC_EXTRA);
 
     out[off++] = (uint8_t)(crc & 0xFFU);
@@ -639,6 +653,7 @@ static void sse_store_serial_latest(sse_serial_latest_t *latest,
     latest->frame_len = stored;
     latest->mode = mode;
     latest->valid = 1;
+    clock_gettime(CLOCK_MONOTONIC, &latest->updated_at);
 }
 
 static int serial_forward_pending(int serial_fd,
@@ -813,48 +828,69 @@ static int open_sse_listener(const char *bind_spec)
     return fd;
 }
 
-static int sse_handshake(int fd, const char *path)
+static void sse_pending_client_reset(sse_pending_client_t *pending)
 {
-    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    char req[1024];
-    size_t used = 0;
-    while (used < sizeof(req) - 1) {
-        ssize_t n = recv(fd, req + used, (sizeof(req) - 1) - used, 0);
-        if (n > 0) {
-            used += (size_t)n;
-            req[used] = '\0';
-            if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) {
-                break;
-            }
-            continue;
-        }
-        if (n == 0) {
-            break;
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            break;
-        }
-        return -1;
+    if (!pending) {
+        return;
     }
+    memset(pending, 0, sizeof(*pending));
+    pending->fd = -1;
+}
 
-    req[used] = '\0';
-    char *line_end = strpbrk(req, "\r\n");
+static void sse_pending_client_close(sse_pending_client_t *pending)
+{
+    if (!pending) {
+        return;
+    }
+    if (pending->fd >= 0) {
+        close(pending->fd);
+    }
+    sse_pending_client_reset(pending);
+}
+
+static int sse_request_complete(const char *request)
+{
+    if (!request) {
+        return 0;
+    }
+    return strstr(request, "\r\n\r\n") || strstr(request, "\n\n");
+}
+
+static void sse_prepare_response(sse_pending_client_t *pending, const char *path)
+{
+    static const char *headers =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: keep-alive\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "X-Accel-Buffering: no\r\n"
+        "\r\n"
+        ": joystick2crsf\n\n";
+    static const char *reject =
+        "HTTP/1.1 404 Not Found\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n\r\n";
+
+    pending->accepted = 0;
+
+    char *line_end = strpbrk(pending->request, "\r\n");
     if (line_end) {
         *line_end = '\0';
     }
 
-    if (strncmp(req, "GET ", 4) != 0) {
-        return -1;
+    if (strncmp(pending->request, "GET ", 4) != 0) {
+        snprintf(pending->response, sizeof(pending->response), "%s", reject);
+        pending->response_len = strlen(pending->response);
+        return;
     }
-    char *uri = req + 4;
+
+    char *uri = pending->request + 4;
     char *space = strchr(uri, ' ');
     if (!space) {
-        return -1;
+        snprintf(pending->response, sizeof(pending->response), "%s", reject);
+        pending->response_len = strlen(pending->response);
+        return;
     }
     *space = '\0';
 
@@ -863,33 +899,22 @@ static int sse_handshake(int fd, const char *path)
         if (strncmp(uri, path, path_len) != 0 ||
             (uri[path_len] != '\0' && uri[path_len] != '?' && uri[path_len] != '#')) {
             fprintf(stderr, "SSE request for unexpected path '%s'\n", uri);
-            return -1;
+            snprintf(pending->response, sizeof(pending->response), "%s", reject);
+            pending->response_len = strlen(pending->response);
+            return;
         }
     }
 
-    static const char *headers =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Cache-Control: no-cache\r\n"
-        "Connection: keep-alive\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "X-Accel-Buffering: no\r\n"
-        "\r\n";
-    static const char *hello = ": joystick2crsf\n\n";
-
-    if (sse_send_all(fd, headers, strlen(headers)) < 0) {
-        return -1;
-    }
-    if (sse_send_all(fd, hello, strlen(hello)) < 0) {
-        return -1;
-    }
-    set_nonblock(fd);
-    return 0;
+    snprintf(pending->response, sizeof(pending->response), "%s", headers);
+    pending->response_len = strlen(pending->response);
+    pending->accepted = 1;
 }
 
-static int sse_accept_pending(int listen_fd, int *client_fd, const char *path)
+static int sse_accept_pending(int listen_fd,
+                              sse_pending_client_t *pending,
+                              const struct timespec *now)
 {
-    if (listen_fd < 0) {
+    if (listen_fd < 0 || !pending || !now) {
         return 0;
     }
 
@@ -904,23 +929,111 @@ static int sse_accept_pending(int listen_fd, int *client_fd, const char *path)
         return -1;
     }
 
-    int prev_fd = *client_fd;
-
-    if (sse_handshake(cfd, path) < 0) {
-        static const char *reject =
-            "HTTP/1.1 404 Not Found\r\n"
-            "Content-Length: 0\r\n"
-            "Connection: close\r\n\r\n";
-        (void)sse_send_all(cfd, reject, strlen(reject));
+    if (set_nonblock(cfd) < 0) {
         close(cfd);
         return 0;
     }
 
-    if (prev_fd >= 0) {
-        close(prev_fd);
+    if (pending->fd >= 0) {
+        sse_pending_client_close(pending);
     }
 
-    *client_fd = cfd;
+    pending->fd = cfd;
+    pending->deadline = timespec_add(*now, SSE_HANDSHAKE_TIMEOUT_SEC, 0);
+    pending->request_used = 0;
+    pending->response_len = 0;
+    pending->response_off = 0;
+    pending->accepted = 0;
+    return 1;
+}
+
+static int sse_service_pending_client(sse_pending_client_t *pending,
+                                      int *client_fd,
+                                      const char *path,
+                                      const struct timespec *now)
+{
+    if (!pending || pending->fd < 0 || !client_fd || !now) {
+        return 0;
+    }
+
+    if (pending->response_len == 0) {
+        while (pending->request_used < sizeof(pending->request) - 1U) {
+            ssize_t n = recv(pending->fd,
+                             pending->request + pending->request_used,
+                             (sizeof(pending->request) - 1U) - pending->request_used,
+                             0);
+            if (n > 0) {
+                pending->request_used += (size_t)n;
+                pending->request[pending->request_used] = '\0';
+                if (sse_request_complete(pending->request)) {
+                    sse_prepare_response(pending, path);
+                    break;
+                }
+                continue;
+            }
+            if (n == 0) {
+                sse_pending_client_close(pending);
+                return 0;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            sse_pending_client_close(pending);
+            return 0;
+        }
+
+        if (pending->response_len == 0 &&
+            pending->request_used >= sizeof(pending->request) - 1U) {
+            sse_pending_client_close(pending);
+            return 0;
+        }
+    }
+
+    if (pending->response_len == 0) {
+        if (timespec_cmp(now, &pending->deadline) >= 0) {
+            fprintf(stderr, "SSE client handshake timed out\n");
+            sse_pending_client_close(pending);
+        }
+        return 0;
+    }
+
+    while (pending->response_off < pending->response_len) {
+        ssize_t n = send(pending->fd,
+                         pending->response + pending->response_off,
+                         pending->response_len - pending->response_off,
+                         MSG_NOSIGNAL);
+        if (n > 0) {
+            pending->response_off += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (timespec_cmp(now, &pending->deadline) >= 0) {
+                fprintf(stderr, "SSE client handshake timed out\n");
+                sse_pending_client_close(pending);
+            }
+            return 0;
+        }
+        sse_pending_client_close(pending);
+        return 0;
+    }
+
+    if (!pending->accepted) {
+        sse_pending_client_close(pending);
+        return 0;
+    }
+
+    if (*client_fd >= 0) {
+        close(*client_fd);
+    }
+    *client_fd = pending->fd;
+    pending->fd = -1;
+    sse_pending_client_reset(pending);
     fprintf(stderr, "SSE client connected\n");
     return 1;
 }
@@ -1396,6 +1509,46 @@ static void config_defaults(config_t *cfg)
     }
 }
 
+static int load_runtime_config(config_t *cfg, const char *path)
+{
+    config_defaults(cfg);
+    if (config_load(cfg, path) < 0) {
+        return -1;
+    }
+    if (!rate_supported(cfg->rate)) {
+        fprintf(stderr, "Config rate must be 25, 50, 125, 250, 333, or 500\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int validate_reload_config(const char *path,
+                                  config_t *cfg,
+                                  int *preopened_sse_fd)
+{
+    int sse_fd = -1;
+
+    if (!cfg || !preopened_sse_fd) {
+        return -1;
+    }
+    if (load_runtime_config(cfg, path) < 0) {
+        return -1;
+    }
+    if (cfg->sse_enabled) {
+        if (cfg->sse_bind[0] == '\0') {
+            fprintf(stderr, "SSE enabled but sse_bind is empty\n");
+            return -1;
+        }
+        sse_fd = open_sse_listener(cfg->sse_bind);
+        if (sse_fd < 0) {
+            return -1;
+        }
+    }
+
+    *preopened_sse_fd = sse_fd;
+    return 0;
+}
+
 static int config_load(config_t *cfg, const char *path)
 {
     FILE *fp = fopen(path, "r");
@@ -1829,15 +1982,12 @@ int main(int argc, char **argv)
     signal(SIGHUP, on_sighup);
     signal(SIGCHLD, SIG_IGN);
 
-    config_t cfg;
-    config_defaults(&cfg);
-    if (config_load(&cfg, conf_path) < 0) {
+    config_t pending_cfg;
+    if (load_runtime_config(&pending_cfg, conf_path) < 0) {
         return 1;
     }
-    if (!rate_supported(cfg.rate)) {
-        fprintf(stderr, "Config rate must be 25, 50, 125, 250, 333, or 500\n");
-        return 1;
-    }
+    int pending_cfg_valid = 1;
+    int pending_sse_fd = -1;
 
     /* SDL Init removed */
 
@@ -1850,13 +2000,13 @@ int main(int argc, char **argv)
 
     while (g_run) {
         config_t cfg;
-        config_defaults(&cfg);
-        if (config_load(&cfg, conf_path) < 0) {
-            exit_code = 1;
-            break;
-        }
-        if (!rate_supported(cfg.rate)) {
-            fprintf(stderr, "Config rate must be 25, 50, 125, 250, 333, or 500\n");
+        int preopened_sse_fd = -1;
+        if (pending_cfg_valid) {
+            cfg = pending_cfg;
+            pending_cfg_valid = 0;
+            preopened_sse_fd = pending_sse_fd;
+            pending_sse_fd = -1;
+        } else if (load_runtime_config(&cfg, conf_path) < 0) {
             exit_code = 1;
             break;
         }
@@ -1876,6 +2026,8 @@ int main(int argc, char **argv)
         int serial_fd = -1;
         int sse_fd = -1;
         int sse_client_fd = -1;
+        sse_pending_client_t sse_pending_client;
+        sse_pending_client_reset(&sse_pending_client);
         struct sockaddr_storage joystick_udp_addr;
         socklen_t joystick_udp_addrlen = 0;
         struct sockaddr_storage serial_udp_addr;
@@ -1953,7 +2105,11 @@ int main(int argc, char **argv)
         }
 
         if (!fatal_error && cfg.sse_enabled) {
-            if (cfg.sse_bind[0] == '\0') {
+            if (preopened_sse_fd >= 0) {
+                sse_fd = preopened_sse_fd;
+                preopened_sse_fd = -1;
+                fprintf(stderr, "SSE listening on %s%s\n", cfg.sse_bind, cfg.sse_path);
+            } else if (cfg.sse_bind[0] == '\0') {
                 fprintf(stderr, "SSE enabled but sse_bind is empty\n");
                 exit_code = 1;
                 fatal_error = 1;
@@ -1985,8 +2141,14 @@ int main(int argc, char **argv)
             if (sse_client_fd >= 0) {
                 close(sse_client_fd);
             }
+            if (sse_pending_client.fd >= 0) {
+                sse_pending_client_close(&sse_pending_client);
+            }
             if (sse_fd >= 0) {
                 close(sse_fd);
+            }
+            if (preopened_sse_fd >= 0) {
+                close(preopened_sse_fd);
             }
             break;
         }
@@ -2200,14 +2362,36 @@ int main(int argc, char **argv)
             }
 
             if (g_reload) {
+                config_t next_cfg;
+                int next_sse_fd = -1;
                 g_reload = 0;
-                fprintf(stderr, "Configuration reload requested; restarting.\n");
+                if (validate_reload_config(conf_path, &next_cfg, &next_sse_fd) < 0) {
+                    fprintf(stderr, "Configuration reload rejected; keeping current config.\n");
+                    continue;
+                }
+                pending_cfg = next_cfg;
+                pending_cfg_valid = 1;
+                pending_sse_fd = next_sse_fd;
+                fprintf(stderr, "Configuration reload validated; restarting.\n");
                 restart_requested = 1;
                 break;
             }
 
+            if (sse_serial_latest.valid &&
+                timespec_diff_ms(&sse_serial_latest.updated_at, &now) >
+                    SSE_SERIAL_STALE_TIMEOUT_MS) {
+                sse_serial_latest.valid = 0;
+            }
+
             if (cfg.sse_enabled && sse_fd >= 0) {
-                int accepted = sse_accept_pending(sse_fd, &sse_client_fd, cfg.sse_path);
+                int accepted = sse_accept_pending(sse_fd, &sse_pending_client, &now);
+                if (accepted > 0) {
+                    next_sse_emit = now;
+                }
+                accepted = sse_service_pending_client(&sse_pending_client,
+                                                      &sse_client_fd,
+                                                      cfg.sse_path,
+                                                      &now);
                 if (accepted > 0) {
                     next_sse_emit = now;
                 }
@@ -2504,9 +2688,15 @@ int main(int argc, char **argv)
             close(sse_client_fd);
             sse_client_fd = -1;
         }
+        if (sse_pending_client.fd >= 0) {
+            sse_pending_client_close(&sse_pending_client);
+        }
         if (sse_fd >= 0) {
             close(sse_fd);
             sse_fd = -1;
+        }
+        if (preopened_sse_fd >= 0) {
+            close(preopened_sse_fd);
         }
 
         if (fatal_error || !g_run) {
@@ -2515,6 +2705,10 @@ int main(int argc, char **argv)
         if (!restart_requested) {
             break;
         }
+    }
+
+    if (pending_sse_fd >= 0) {
+        close(pending_sse_fd);
     }
 
     return exit_code;
